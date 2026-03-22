@@ -193,7 +193,7 @@ class CrawlingService:
                 # Debug log what we're receiving
                 safe_logfire_info(
                     f"Progress callback received | status={status} | progress={progress} | "
-                    f"total_pages={kwargs.get('total_pages', 'N/A')} | processed_pages={kwargs.get('processed_pages', 'N/A')} | "
+                    f"total_pages={kwargs.get('total_pages', 'N/A')} | processed_pages={kwargs.get('processed_pages', 'N/A')} | "       
                     f"kwargs_keys={list(kwargs.keys())}"
                 )
 
@@ -201,61 +201,14 @@ class CrawlingService:
                 mapped_progress = self.progress_mapper.map_progress(base_status, progress)
 
                 # Update progress via tracker (stores in memory for HTTP polling)
-                await self.progress_tracker.update(status=base_status, progress=mapped_progress, log=message, **kwargs)
-                safe_logfire_info(
-                    f"Updated crawl progress | progress_id={self.progress_id} | status={base_status} | "
-                    f"raw_progress={progress} | mapped_progress={mapped_progress} | "
-                    f"total_pages={kwargs.get('total_pages', 'N/A')} | processed_pages={kwargs.get('processed_pages', 'N/A')}"
+                await self.progress_tracker.update(
+                    status=status,
+                    progress=mapped_progress,
+                    log=message,
+                    **kwargs,
                 )
 
         return callback
-
-    async def _handle_progress_update(self, task_id: str, update: dict[str, Any]) -> None:
-        """
-        Handle progress updates from background task.
-
-        Args:
-            task_id: The task ID for the progress update
-            update: Dictionary containing progress update data
-        """
-        if self.progress_tracker:
-            # Update progress via tracker for HTTP polling
-            await self.progress_tracker.update(
-                status=update.get("status", "processing"),
-                progress=update.get("progress", update.get("percentage", 0)),  # Support both for compatibility
-                log=update.get("log", "Processing..."),
-                **{k: v for k, v in update.items() if k not in ["status", "progress", "percentage", "log"]},
-            )
-
-    # Simple delegation methods for backward compatibility
-    async def crawl_single_page(self, url: str, retry_count: int = 3) -> dict[str, Any]:
-        """Crawl a single web page."""
-        return await self.single_page_strategy.crawl_single_page(
-            url,
-            self.url_handler.transform_github_url,
-            self.site_config.is_documentation_site,
-            retry_count,
-        )
-
-    async def crawl_markdown_file(
-        self,
-        url: str,
-        progress_callback: Callable[[str, int, str], Awaitable[None]] | None = None,
-        start_progress: int = 10,
-        end_progress: int = 20,
-    ) -> list[dict[str, Any]]:
-        """Crawl a .txt or markdown file."""
-        return await self.single_page_strategy.crawl_markdown_file(
-            url,
-            self.url_handler.transform_github_url,
-            progress_callback,
-            start_progress,
-            end_progress,
-        )
-
-    def parse_sitemap(self, sitemap_url: str) -> list[str]:
-        """Parse a sitemap and extract URLs."""
-        return self.sitemap_strategy.parse_sitemap(sitemap_url, self._check_cancellation)
 
     async def crawl_batch_with_progress(
         self,
@@ -264,15 +217,20 @@ class CrawlingService:
         progress_callback: Callable[[str, int, str], Awaitable[None]] | None = None,
         link_text_fallbacks: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Batch crawl multiple URLs in parallel."""
+        """
+        Crawl a batch of URLs with progress reporting.
+
+        Args:
+            urls: List of URLs to crawl
+            max_concurrent: Maximum concurrent crawls (None uses DB settings)
+            progress_callback: Optional progress callback
+            link_text_fallbacks: Optional mapping of URL to link text for title fallback
+
+        Returns:
+            List of crawl results
+        """
         return await self.batch_strategy.crawl_batch_with_progress(
-            urls,
-            self.url_handler.transform_github_url,
-            self.site_config.is_documentation_site,
-            max_concurrent,
-            progress_callback,
-            self._check_cancellation,  # Pass cancellation check
-            link_text_fallbacks,  # Pass link text fallbacks
+            urls, max_concurrent, progress_callback, self._check_cancellation, link_text_fallbacks
         )
 
     async def crawl_recursive_with_progress(
@@ -283,11 +241,28 @@ class CrawlingService:
         progress_callback: Callable[[str, int, str], Awaitable[None]] | None = None,
         source_id: str | None = None,
         url_state_service: Any | None = None,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Recursively crawl internal links from start URLs."""
+        """
+        Recursively crawl URLs with progress reporting.
+
+        Args:
+            start_urls: List of starting URLs
+            max_depth: Maximum crawl depth
+            max_concurrent: Maximum concurrent crawls (None uses DB settings)
+            progress_callback: Optional progress callback
+            source_id: Optional source ID for resume filtering
+            url_state_service: Optional URL state service for checkpoint/resume
+            include_patterns: Optional list of glob patterns to include
+            exclude_patterns: Optional list of glob patterns to exclude
+
+        Returns:
+            List of crawl results
+        """
         return await self.recursive_strategy.crawl_recursive_with_progress(
             start_urls,
-            self.url_handler.transform_github_url,
+            self.url_handler.transform_url,
             self.site_config.is_documentation_site,
             max_depth,
             max_concurrent,
@@ -295,439 +270,168 @@ class CrawlingService:
             self._check_cancellation,  # Pass cancellation check
             source_id,
             url_state_service,
+            include_patterns,
+            exclude_patterns,
         )
 
-    # Orchestration methods
-    async def orchestrate_crawl(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def crawl_single_page(
+        self, url: str, progress_callback: Callable[[str, int, str], Awaitable[None]] | None = None
+    ) -> list[dict[str, Any]]:
         """
-        Main orchestration method - non-blocking using asyncio.create_task.
+        Crawl a single page.
 
         Args:
-            request: The crawl request containing url, knowledge_type, tags, max_depth, etc.
+            url: URL to crawl
+            progress_callback: Optional progress callback
 
         Returns:
-            Dict containing task_id, status, and the asyncio task reference
+            List containing the crawl result
         """
-        url = str(request.get("url", ""))
-        safe_logfire_info(f"Starting background crawl orchestration | url={url}")
+        return await self.single_page_strategy.crawl_single_page(url, progress_callback, self._check_cancellation)
 
-        # Create task ID
-        task_id = self.progress_id or str(uuid.uuid4())
-
-        # Register this orchestration service for cancellation support
-        if self.progress_id:
-            await register_orchestration(self.progress_id, self)
-
-        # Start the crawl as an async task in the main event loop
-        # Store the task reference for proper cancellation
-        crawl_task = asyncio.create_task(self._async_orchestrate_crawl(request, task_id))
-
-        # Set a name for the task to help with debugging
-        if self.progress_id:
-            crawl_task.set_name(f"crawl_{self.progress_id}")
-
-        # Return immediately with task reference
-        return {
-            "task_id": task_id,
-            "status": "started",
-            "message": f"Crawl operation started for {url}",
-            "progress_id": self.progress_id,
-            "task": crawl_task,  # Return the actual task for proper cancellation
-        }
-
-    async def _async_orchestrate_crawl(self, request: dict[str, Any], task_id: str):
+    async def crawl_markdown_file(
+        self, url: str, progress_callback: Callable[[str, int, str], Awaitable[None]] | None = None
+    ) -> list[dict[str, Any]]:
         """
-        Async orchestration that runs in the main event loop.
+        Crawl a markdown file directly.
+
+        Args:
+            url: URL of the markdown file
+            progress_callback: Optional progress callback
+
+        Returns:
+            List containing the crawl result
         """
-        last_heartbeat = asyncio.get_event_loop().time()
-        heartbeat_interval = 30.0  # Send heartbeat every 30 seconds
+        return await self.single_page_strategy.crawl_markdown_file(url, progress_callback, self._check_cancellation)
 
-        async def send_heartbeat_if_needed():
-            """Send heartbeat to keep connection alive"""
-            nonlocal last_heartbeat
-            current_time = asyncio.get_event_loop().time()
-            if current_time - last_heartbeat >= heartbeat_interval:
-                await self._handle_progress_update(
-                    task_id,
-                    {
-                        "status": self.progress_mapper.get_current_stage(),
-                        "progress": self.progress_mapper.get_current_progress(),
-                        "heartbeat": True,
-                        "log": "Background task still running...",
-                        "message": "Processing...",
-                    },
-                )
-                last_heartbeat = current_time
+    def parse_sitemap(self, sitemap_url: str) -> list[str]:
+        """
+        Parse a sitemap and return list of URLs.
 
+        Args:
+            sitemap_url: URL of the sitemap
+
+        Returns:
+            List of URLs found in the sitemap
+        """
+        return self.sitemap_strategy.parse_sitemap(sitemap_url, self._check_cancellation)
+
+    async def orchestrate_crawl(self, request: dict[str, Any], task_id: str = None) -> str:
+        """
+        Orchestrate a crawling operation.
+        This is the main entry point for starting a crawl.
+
+        Args:
+            request: The crawl request parameters
+            task_id: Optional task ID for background task management
+
+        Returns:
+            The progress ID for tracking the operation
+        """
+        # Generate progress ID if not provided
+        progress_id = self.progress_id or str(uuid.uuid4())
+        self.set_progress_id(progress_id)
+
+        # Register this orchestration for cancellation support
+        await register_orchestration(progress_id, self)
+
+        # Start the crawl in the background
+        # We don't await this, it runs independently and updates progress via ProgressTracker
+        asyncio.create_task(self._async_orchestrate_crawl(request, task_id))
+
+        return progress_id
+
+    async def _handle_progress_update(self, task_id: str, update: dict[str, Any]) -> None:
+        """
+        Handle progress updates from background task.
+
+        Args:
+            task_id: The task ID for the progress update
+            update: The progress update data
+        """
+        if self.progress_tracker:
+            status = update.get("status", "in_progress")
+            progress = update.get("progress", 0)
+            log = update.get("log", "")
+
+            # Flatten additional fields
+            extra_fields = {k: v for k, v in update.items() if k not in ["status", "progress", "log"]}
+
+            await self.progress_tracker.update(status=status, progress=progress, log=log, **extra_fields)
+
+    async def _async_orchestrate_crawl(self, request: dict[str, Any], task_id: str = None) -> None:
+        """
+        Background task for crawl orchestration.
+
+        Args:
+            request: The crawl request parameters
+            task_id: Optional task ID
+        """
         try:
-            url = str(request.get("url", ""))
-            safe_logfire_info(f"Starting async crawl orchestration | url={url} | task_id={task_id}")
+            url = request.get("url")
+            if not url:
+                raise ValueError("URL is required")
 
-            # Start the progress tracker if available
-            if self.progress_tracker:
-                await self.progress_tracker.start(
-                    {"url": url, "status": "starting", "progress": 0, "log": f"Starting crawl of {url}"}
-                )
+            # Check for existing source state
+            source_id = request.get("source_id")
+            has_existing_state = request.get("resume", False) and source_id is not None
 
-            # Generate unique source_id and display name from the original URL
-            original_source_id = self.url_handler.generate_unique_source_id(url)
-            source_display_name = self.url_handler.extract_display_name(url)
-            safe_logfire_info(
-                f"Generated unique source_id '{original_source_id}' and display name '{source_display_name}' from URL '{url}'"
-            )
+            # Helper to update progress using ProgressMapper
+            async def update_mapped_progress(stage: str, stage_progress: int, log: str, **kwargs):
+                if self.progress_tracker:
+                    mapped = self.progress_mapper.map_progress(stage, stage_progress)
+                    await self.progress_tracker.update(status=stage, progress=mapped, log=log, **kwargs)
 
-            # Set source_id on progress tracker immediately for pause/resume support
-            if self.progress_tracker:
-                await self.progress_tracker.update(
-                    status="starting",
-                    progress=self.progress_tracker.state.get("progress", 0),
-                    log=f"Initializing crawl for {url}",
-                    source_id=original_source_id,
-                )
-                safe_logfire_info(
-                    f"Set source_id on progress tracker early | progress_id={self.progress_id} | source_id={original_source_id}"
-                )
+            # Stage 1: Discovery (0-25%)
+            await update_mapped_progress("starting", 0, f"Starting crawl orchestration for {url}")
 
-            # Create minimal source record immediately for pause/resume support
-            # This ensures auto-resume can always find source metadata even if crawl is interrupted early
-            # REQUIRED: Source creation must succeed for pause/resume to work
-            max_retries = 3
-            retry_delay = 1.0  # Start with 1 second
-            last_error = None
+            # Send initial heartbeat
+            last_heartbeat = asyncio.get_event_loop().time()
 
-            for attempt in range(max_retries):
-                try:
-                    existing_source = (
-                        self.supabase_client.table("archon_sources")
-                        .select("source_id")
-                        .eq("source_id", original_source_id)
-                        .execute()
-                    )
+            async def send_heartbeat_if_needed():
+                nonlocal last_heartbeat
+                current = asyncio.get_event_loop().time()
+                if current - last_heartbeat > 5.0:  # Every 5 seconds
+                    if self.progress_tracker:
+                        await self.progress_tracker.update(status=None, progress=None, log=None)
+                    last_heartbeat = current
 
-                    if not existing_source.data:
-                        # Create minimal source record with essential metadata
-                        minimal_source = {
-                            "source_id": original_source_id,
-                            "source_url": url,
-                            "source_display_name": source_display_name,
-                            "metadata": {
-                                "original_url": url,
-                                "knowledge_type": request.get("knowledge_type", "general"),
-                                "tags": request.get("tags", []),
-                                "max_depth": request.get("max_depth", 2),
-                                "allow_external_links": request.get("allow_external_links", False),
-                                "source_type": "url",
-                                "auto_generated": False,
-                            },
-                            "pipeline_status": "idle",
-                        }
-
-                        self.supabase_client.table("archon_sources").insert(minimal_source).execute()
-                        safe_logfire_info(
-                            f"Created minimal source record for pause/resume support | source_id={original_source_id}"
-                        )
-                    else:
-                        safe_logfire_info(f"Source record already exists | source_id={original_source_id}")
-
-                    # Success - break out of retry loop
-                    break
-
-                except Exception as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        # Not the last attempt - retry with exponential backoff
-                        safe_logfire_error(
-                            f"Failed to create source record (attempt {attempt + 1}/{max_retries}): {e} | "
-                            f"source_id={original_source_id} | retrying in {retry_delay}s"
-                        )
-                        await asyncio.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                    else:
-                        # Last attempt failed - raise exception to fail the crawl
-                        safe_logfire_error(
-                            f"Failed to create source record after {max_retries} attempts: {e} | "
-                            f"source_id={original_source_id} | FAILING CRAWL"
-                        )
-                        raise Exception(
-                            f"Failed to create source record after {max_retries} attempts. "
-                            f"Pause/resume will not work without a source record. "
-                            f"Please check database connectivity and try again. Error: {str(e)}"
-                        ) from last_error
-
-            # Check for existing crawl state and determine if we're resuming
-            url_state_service = get_crawl_url_state_service(self.supabase_client)
-            has_existing_state = url_state_service.has_existing_state(original_source_id)
-
-            if has_existing_state:
-                crawl_state = url_state_service.get_crawl_state(original_source_id)
-                pending_count = crawl_state.get("pending", 0)
-                embedded_count = crawl_state.get("embedded", 0)
-                failed_count = crawl_state.get("failed", 0)
-                total_count = crawl_state.get("total", 0)
-
-                # If there are pending or failed URLs, log resume info
-                if pending_count > 0 or failed_count > 0:
-                    safe_logfire_info(
-                        f"Resuming crawl | source_id={original_source_id} | "
-                        f"embedded={embedded_count} | pending={pending_count} | failed={failed_count} | total={total_count}"
-                    )
-                else:
-                    # All URLs processed - clear old state for fresh crawl
-                    url_state_service.clear_state(original_source_id)
-                    safe_logfire_info(f"Cleared completed crawl state for fresh crawl | source_id={original_source_id}")
-
-            # Helper to update progress with mapper
-            async def update_mapped_progress(stage: str, stage_progress: int, message: str, **kwargs):
-                overall_progress = self.progress_mapper.map_progress(stage, stage_progress)
-                await self._handle_progress_update(
-                    task_id,
-                    {
-                        "status": stage,
-                        "progress": overall_progress,
-                        "log": message,
-                        "message": message,
-                        **kwargs,
-                    },
-                )
-
-            # Initial progress
-            await update_mapped_progress("starting", 100, f"Starting crawl of {url}", current_url=url)
-
-            # Check for cancellation before proceeding
-            self._check_cancellation()
-
-            # Discovery phase - find the single best related file
-            discovered_urls = []
-            # Skip discovery if the URL itself is already a discovery target (sitemap, llms file, etc.)
-            is_already_discovery_target = (
-                self.url_handler.is_sitemap(url)
-                or self.url_handler.is_llms_variant(url)
-                or self.url_handler.is_robots_txt(url)
-                or self.url_handler.is_well_known_file(url)
-                or self.url_handler.is_txt(url)  # Also skip for any .txt file that user provides directly
-            )
-
-            if is_already_discovery_target:
-                safe_logfire_info(f"Skipping discovery - URL is already a discovery target file: {url}")
-
-            if (
-                request.get("auto_discovery", True) and not is_already_discovery_target
-            ):  # Default enabled, but skip if already a discovery file
-                await update_mapped_progress(
-                    "discovery", 25, f"Discovering best related file for {url}", current_url=url
-                )
-
-                # Check for cancellation before discovery
-                self._check_cancellation()
-
-                try:
-                    # Offload potential sync I/O to avoid blocking the event loop
-                    discovered_file = await asyncio.to_thread(self.discovery_service.discover_files, url)
-
-                    # Check for cancellation after discovery completes
-                    self._check_cancellation()
-
-                    # Add the single best discovered file to crawl list
-                    if discovered_file:
-                        safe_logfire_info(f"Discovery found file: {discovered_file}")
-                        # Filter through is_binary_file() check like existing code
-                        if not self.url_handler.is_binary_file(discovered_file):
-                            discovered_urls.append(discovered_file)
-                            safe_logfire_info(f"Adding discovered file to crawl: {discovered_file}")
-
-                            # Determine file type for user feedback
-                            discovered_file_type = "unknown"
-                            if self.url_handler.is_llms_variant(discovered_file):
-                                discovered_file_type = "llms.txt"
-                            elif self.url_handler.is_sitemap(discovered_file):
-                                discovered_file_type = "sitemap"
-                            elif self.url_handler.is_robots_txt(discovered_file):
-                                discovered_file_type = "robots.txt"
-
-                            await update_mapped_progress(
-                                "discovery",
-                                100,
-                                f"Discovery completed: found {discovered_file_type} file",
-                                current_url=url,
-                                discovered_file=discovered_file,
-                                discovered_file_type=discovered_file_type,
-                            )
-                        else:
-                            safe_logfire_info(f"Skipping binary file: {discovered_file}")
-                    else:
-                        safe_logfire_info(f"Discovery found no files for {url}")
-                        await update_mapped_progress(
-                            "discovery",
-                            100,
-                            "Discovery completed: no special files found, will crawl main URL",
-                            current_url=url,
-                        )
-
-                except Exception as e:
-                    safe_logfire_error(f"Discovery phase failed: {e}")
-                    # Continue with regular crawl even if discovery fails
-                    await update_mapped_progress(
-                        "discovery", 100, "Discovery phase failed, continuing with regular crawl", current_url=url
-                    )
-
-            # Check for cancellation before analyzing
-            self._check_cancellation()
-
-            # Analyzing stage - determine what to crawl
-            if discovered_urls:
-                # Discovery found a file - crawl ONLY the discovered file, not the main URL
-                total_urls_to_crawl = len(discovered_urls)
-                await update_mapped_progress(
-                    "analyzing",
-                    50,
-                    f"Analyzing discovered file: {discovered_urls[0]}",
-                    total_pages=total_urls_to_crawl,
-                    processed_pages=0,
-                )
-
-                # Crawl only the discovered file with discovery context
-                discovered_url = discovered_urls[0]
-                safe_logfire_info(f"Crawling discovered file instead of main URL: {discovered_url}")
-
-                # Mark this as a discovery target for domain filtering
-                discovery_request = request.copy()
-                discovery_request["is_discovery_target"] = True
-                discovery_request["original_domain"] = self.url_handler.get_base_url(discovered_url)
-
-                crawl_results, crawl_type = await self._crawl_by_url_type(
-                    discovered_url, discovery_request, original_source_id, has_existing_state
-                )
-
+            # Perform discovery if needed
+            discovery_results = None
+            if not has_existing_state:
+                # Normal path: discover and crawl
+                crawl_results, crawl_type = await self._crawl_by_url_type(url, request, source_id, has_existing_state)
             else:
-                # No discovery - crawl the main URL normally
-                total_urls_to_crawl = 1
-                await update_mapped_progress(
-                    "analyzing", 50, f"Analyzing URL type for {url}", total_pages=total_urls_to_crawl, processed_pages=0
-                )
-
-                # Crawl the main URL
-                safe_logfire_info(f"No discovery file found, crawling main URL: {url}")
-                crawl_results, crawl_type = await self._crawl_by_url_type(url, request, original_source_id, has_existing_state)
-
-            # Update progress tracker with crawl type
-            if self.progress_tracker and crawl_type:
-                # Use mapper to get correct progress value
-                mapped_progress = self.progress_mapper.map_progress("crawling", 100)  # 100% of crawling stage
-                await self.progress_tracker.update(
-                    status="crawling",
-                    progress=mapped_progress,
-                    log=f"Processing {crawl_type} content",
-                    crawl_type=crawl_type,
-                )
-
-            # Check for cancellation after crawling
-            self._check_cancellation()
-
-            # Send heartbeat after potentially long crawl operation
-            await send_heartbeat_if_needed()
+                # Resume path: we have a source_id and want to continue
+                # We skip discovery and go straight to crawling with the filtered list
+                logger.info(f"Resuming crawl for source_id={source_id}")
+                crawl_results, crawl_type = await self._crawl_by_url_type(url, request, source_id, has_existing_state)
 
             if not crawl_results:
-                raise ValueError("No content was crawled from the provided URL")
+                raise ValueError(f"No pages could be crawled from {url}")
 
-            # Processing stage
-            await update_mapped_progress("processing", 50, "Processing crawled content")
-
-            # Check for cancellation before document processing
-            self._check_cancellation()
-
-            # Calculate total work units for accurate progress tracking
+            # Total pages for progress context
             total_pages = len(crawl_results)
 
-            # Process and store documents using document storage operations
-            last_logged_progress = 0
-
-            async def doc_storage_callback(status: str, progress: int, message: str, **kwargs):
-                nonlocal last_logged_progress
-
-                # Log only significant progress milestones (every 5%) or status changes
-                should_log_debug = (
-                    status != "document_storage"  # Status changes
-                    or progress == 100  # Completion
-                    or progress == 0  # Start
-                    or abs(progress - last_logged_progress) >= 5  # 5% progress changes
-                )
-
-                if should_log_debug:
-                    safe_logfire_info(
-                        f"Document storage progress: {progress}% | status={status} | "
-                        f"message={message[:50]}..." + ("..." if len(message) > 50 else "")
-                    )
-                    last_logged_progress = progress
-
-                if self.progress_tracker:
-                    # Use ProgressMapper to ensure progress never goes backwards
-                    mapped_progress = self.progress_mapper.map_progress("document_storage", progress)
-
-                    # Update progress state via tracker
-                    await self.progress_tracker.update(
-                        status="document_storage",
-                        progress=mapped_progress,
-                        log=message,
-                        total_pages=total_pages,
-                        **kwargs,
-                    )
-
-            storage_results = await self.doc_storage_ops.process_and_store_documents(
+            # Stage 2: Document Storage (25-40%)
+            # The progress within document storage is handled by the operations class
+            storage_results = await self.doc_storage_ops.store_crawled_pages(
                 crawl_results,
-                request,
-                crawl_type,
-                original_source_id,
-                doc_storage_callback,
-                self._check_cancellation,
-                source_url=url,
-                source_display_name=source_display_name,
-                url_to_page_id=None,  # Will be populated after page storage
+                progress_callback=await self._create_crawl_progress_callback("document_storage"),
+                cancellation_check=self._check_cancellation,
+                source_id=source_id,
             )
 
-            # Update progress tracker with source_id now that it's created
-            if self.progress_tracker and storage_results.get("source_id"):
-                # Update the tracker to include source_id for frontend matching
-                # Use update method to maintain timestamps and invariants
-                await self.progress_tracker.update(
-                    status=self.progress_tracker.state.get("status", "document_storage"),
-                    progress=self.progress_tracker.state.get("progress", 0),
-                    log=self.progress_tracker.state.get("log", "Processing documents"),
-                    source_id=storage_results["source_id"],
-                )
-                safe_logfire_info(
-                    f"Updated progress tracker with source_id | progress_id={self.progress_id} | source_id={storage_results['source_id']}"
-                )
+            actual_chunks_stored = storage_results["chunks_stored"]
 
-            # Check for cancellation after document storage
-            self._check_cancellation()
-
-            # Send heartbeat after document storage
-            await send_heartbeat_if_needed()
-
-            # CRITICAL: Verify that chunks were actually stored
-            actual_chunks_stored = storage_results.get("chunks_stored", 0)
-            if storage_results["chunk_count"] > 0 and actual_chunks_stored == 0:
-                # We processed chunks but none were stored - this is a failure
-                error_msg = (
-                    f"Failed to store documents: {storage_results['chunk_count']} chunks processed but 0 stored "
-                    f"| url={url} | progress_id={self.progress_id}"
-                )
-                safe_logfire_error(error_msg)
-                raise ValueError(error_msg)
-
-            # Extract code examples if requested
+            # Stage 3: Code Extraction (40-90%)
             code_examples_count = 0
-            if request.get("extract_code_examples", True) and actual_chunks_stored > 0:
-                # Check for cancellation before starting code extraction
-                self._check_cancellation()
-
-                await update_mapped_progress("code_extraction", 0, "Starting code extraction...")
-
-                # Create progress callback for code extraction
-                async def code_progress_callback(data: dict):
+            if request.get("extract_code", True):
+                # The progress within code extraction is handled by the operations class
+                async def code_progress_callback(data: dict[str, Any]):
                     if self.progress_tracker:
-                        # Use ProgressMapper to ensure progress never goes backwards
-                        raw_progress = data.get("progress", data.get("percentage", 0))
+                        # Extract percentage and message from callback data
+                        raw_progress = data.get("percentage", 0)
                         mapped_progress = self.progress_mapper.map_progress("code_extraction", raw_progress)
 
                         # Update progress state via tracker
@@ -1073,6 +777,43 @@ class CrawlingService:
                                             same_domain_links.append((link, text))
                                             logger.debug(f"Found same-domain link: {link}")
 
+                            # Apply glob pattern filtering or selected URLs
+                            if same_domain_links:
+                                original_count = len(same_domain_links)
+
+                                # Extract filtering parameters from request
+                                include_patterns = request.get("url_include_patterns", [])
+                                exclude_patterns = request.get("url_exclude_patterns", [])
+                                selected_urls = request.get("selected_urls")
+
+                                # Option 1: Use selected_urls from review modal (takes precedence)
+                                if selected_urls:
+                                    selected_urls_set = set(selected_urls)
+                                    same_domain_links = [
+                                        (link, text) for link, text in same_domain_links
+                                        if link in selected_urls_set
+                                    ]
+                                    logger.info(
+                                        f"Applied selected_urls filter: {original_count} → {len(same_domain_links)} links "
+                                        f"({original_count - len(same_domain_links)} filtered)"
+                                    )
+
+                                # Option 2: Apply glob pattern filtering
+                                elif include_patterns or exclude_patterns:
+                                    filtered_links = []
+                                    for link, text in same_domain_links:
+                                        if self.url_handler.matches_glob_patterns(link, include_patterns, exclude_patterns):
+                                            filtered_links.append((link, text))
+
+                                    filtered_count = original_count - len(filtered_links)
+                                    same_domain_links = filtered_links
+
+                                    logger.info(
+                                        f"Applied glob pattern filter: {original_count} → {len(same_domain_links)} links "
+                                        f"({filtered_count} filtered) | "
+                                        f"include={include_patterns} | exclude={exclude_patterns}"
+                                    )
+
                             if same_domain_links:
                                 # Build mapping and extract just URLs
                                 url_to_link_text = dict(same_domain_links)
@@ -1124,7 +865,7 @@ class CrawlingService:
                         self_filtered_count = original_count - len(extracted_links_with_text)
                         if self_filtered_count > 0:
                             logger.info(
-                                f"Filtered out {self_filtered_count} self-referential links from {original_count} extracted links"
+                                f"Filtered out {self_filtered_count} self-referential links from {original_count} extracted links"      
                             )
 
                     # For discovery targets, only follow same-domain links
@@ -1235,22 +976,60 @@ class CrawlingService:
             sitemap_urls = self.parse_sitemap(url)
 
             if sitemap_urls:
-                # Apply resume filtering if we have existing state
+                # 1. Apply resume filtering if enabled
                 if has_existing_state and source_id:
                     sitemap_urls = await self._filter_already_processed_urls(source_id, sitemap_urls)
 
-                if sitemap_urls:  # Only proceed if there are URLs left to crawl
-                    # Update progress before starting batch crawl
-                    await update_crawl_progress(
-                        75,  # 75% of crawling stage
-                        f"Starting batch crawl of {len(sitemap_urls)} URLs...",
-                        crawl_type=crawl_type,
-                    )
+                if sitemap_urls:
+                    original_count = len(sitemap_urls)
 
-                    crawl_results = await self.crawl_batch_with_progress(
-                        sitemap_urls,
-                        progress_callback=await self._create_crawl_progress_callback("crawling"),
-                    )
+                    # 2. Apply glob pattern filtering or selected URLs
+                    include_patterns = request.get("url_include_patterns", [])
+                    exclude_patterns = request.get("url_exclude_patterns", [])
+                    selected_urls = request.get("selected_urls")
+
+                    # Option 1: Use selected_urls from review modal (takes precedence)
+                    if selected_urls:
+                        selected_urls_set = set(selected_urls)
+                        sitemap_urls = [
+                            u for u in sitemap_urls
+                            if u in selected_urls_set
+                        ]
+                        logger.info(
+                            f"Applied selected_urls filter to sitemap: {original_count} → {len(sitemap_urls)} URLs "
+                            f"({original_count - len(sitemap_urls)} filtered)"
+                        )
+
+                    # Option 2: Apply glob pattern filtering
+                    elif include_patterns or exclude_patterns:
+                        filtered_urls = []
+                        for sitemap_url in sitemap_urls:
+                            if self.url_handler.matches_glob_patterns(sitemap_url, include_patterns, exclude_patterns):
+                                filtered_urls.append(sitemap_url)
+
+                        filtered_count = original_count - len(filtered_urls)
+                        sitemap_urls = filtered_urls
+
+                        logger.info(
+                            f"Applied glob pattern filter to sitemap: {original_count} → {len(sitemap_urls)} URLs "
+                            f"({filtered_count} filtered) | "
+                            f"include={include_patterns} | exclude={exclude_patterns}"
+                        )
+
+                    if sitemap_urls:  # Only proceed if there are URLs left to crawl
+                        # Update progress before starting batch crawl
+                        await update_crawl_progress(
+                            75,  # 75% of crawling stage
+                            f"Starting batch crawl of {len(sitemap_urls)} URLs...",
+                            crawl_type=crawl_type,
+                        )
+
+                        crawl_results = await self.crawl_batch_with_progress(
+                            sitemap_urls,
+                            progress_callback=await self._create_crawl_progress_callback("crawling"),
+                        )
+                    else:
+                        logger.info("Pattern filtering: all sitemap URLs filtered out, nothing to crawl")
                 else:
                     logger.info("Resume filtering: all sitemap URLs already embedded, nothing to crawl")
 
@@ -1264,8 +1043,15 @@ class CrawlingService:
             )
 
             max_depth = request.get("max_depth", 1)
-            # Let the strategy handle concurrency from settings
-            # This will use CRAWL_MAX_CONCURRENT from database (default: 10)
+            include_patterns = request.get("url_include_patterns", [])
+            exclude_patterns = request.get("url_exclude_patterns", [])
+
+            # Log pattern configuration for debugging
+            if include_patterns or exclude_patterns:
+                logger.info(
+                    f"Recursive crawl with glob patterns | "
+                    f"include={include_patterns} | exclude={exclude_patterns}"
+                )
 
             url_state_service = get_crawl_url_state_service(self.supabase_client) if source_id else None
             crawl_results = await self.crawl_recursive_with_progress(
@@ -1275,6 +1061,8 @@ class CrawlingService:
                 progress_callback=await self._create_crawl_progress_callback("crawling"),
                 source_id=source_id,
                 url_state_service=url_state_service,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
             )
 
         return crawl_results, crawl_type

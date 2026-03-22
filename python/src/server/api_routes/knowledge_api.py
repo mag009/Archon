@@ -19,8 +19,9 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 # Basic validation - simplified inline version
+
 # Import unified logging
-from ..config.logfire_config import get_logger, safe_logfire_error, safe_logfire_info, safe_logfire_warning
+from ..config.logfire_config import get_logger, safe_logfire_error, safe_logfire_info
 from ..services.crawler_manager import get_crawler
 from ..services.crawling import CrawlingService
 from ..services.credential_service import credential_service
@@ -30,6 +31,7 @@ from ..services.search.rag_service import RAGService
 from ..services.storage import DocumentStorageService
 from ..utils import get_supabase_client
 from ..utils.document_processing import extract_text_from_document
+from ..utils.url_validation import sanitize_glob_patterns, validate_url
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -52,21 +54,16 @@ router = APIRouter(prefix="/api", tags=["knowledge"])
 CONCURRENT_CRAWL_LIMIT = 3  # Max simultaneous crawl operations (protects server resources)
 crawl_semaphore = asyncio.Semaphore(CONCURRENT_CRAWL_LIMIT)
 
-# Semaphores for re-vectorize and re-summarize operations
-CONCURRENT_REVECTORIZE_LIMIT = 2
-revectorize_semaphore = asyncio.Semaphore(CONCURRENT_REVECTORIZE_LIMIT)
-
-CONCURRENT_RESUMMARIZE_LIMIT = 2
-resummarize_semaphore = asyncio.Semaphore(CONCURRENT_RESUMMARIZE_LIMIT)
-
 # Track active async crawl tasks for cancellation support
 active_crawl_tasks: dict[str, asyncio.Task] = {}
+
+
 
 
 async def _validate_provider_api_key(provider: str = None) -> None:
     """Validate LLM provider API key before starting operations."""
     logger.info("🔑 Starting API key validation...")
-
+    
     try:
         # Basic provider validation
         if not provider:
@@ -80,8 +77,8 @@ async def _validate_provider_api_key(provider: str = None) -> None:
                     detail={
                         "error": "Invalid provider name",
                         "message": f"Provider '{provider}' not supported",
-                        "error_type": "validation_error",
-                    },
+                        "error_type": "validation_error"
+                    }
                 )
 
         # Basic sanitization for logging
@@ -95,7 +92,9 @@ async def _validate_provider_api_key(provider: str = None) -> None:
             test_result = await create_embedding(text="test", provider=provider)
 
             if not test_result:
-                logger.error(f"❌ {provider.title()} API key validation failed - no embedding returned")
+                logger.error(
+                    f"❌ {provider.title()} API key validation failed - no embedding returned"
+                )
                 raise HTTPException(
                     status_code=401,
                     detail={
@@ -119,7 +118,7 @@ async def _validate_provider_api_key(provider: str = None) -> None:
                     "provider": provider,
                 },
             )
-
+            
         logger.info(f"✅ {provider.title()} API key validation successful")
 
     except HTTPException:
@@ -131,7 +130,7 @@ async def _validate_provider_api_key(provider: str = None) -> None:
         error_str = str(e)
         sanitized_error = ProviderErrorFactory.sanitize_provider_error(error_str, provider or "openai")
         logger.error(f"❌ Caught exception during API key validation: {sanitized_error}")
-
+        
         # Always fail for any exception during validation - better safe than sorry
         logger.error("🚨 API key validation failed - blocking crawl operation")
         raise HTTPException(
@@ -140,8 +139,8 @@ async def _validate_provider_api_key(provider: str = None) -> None:
                 "error": "Invalid API key",
                 "message": f"Please verify your {(provider or 'openai').title()} API key in Settings before starting a crawl.",
                 "error_type": "authentication_failed",
-                "provider": provider or "openai",
-            },
+                "provider": provider or "openai"
+            }
         ) from None
 
 
@@ -153,7 +152,12 @@ class KnowledgeItemRequest(BaseModel):
     update_frequency: int = 7
     max_depth: int = 2  # Maximum crawl depth (1-5)
     extract_code_examples: bool = True  # Whether to extract code examples
-    use_new_pipeline: bool = True  # Whether to use the new restartable pipeline
+    # Glob pattern filtering
+    url_include_patterns: list[str] = []  # Include URL patterns (e.g., ["**/en/**"])
+    url_exclude_patterns: list[str] = []  # Exclude URL patterns (e.g., ["**/fr/**", "**/de/**"])
+    # Link review mode
+    selected_urls: list[str] | None = None  # Specific URLs to crawl (from review modal)
+    skip_link_review: bool = False  # If True, apply patterns automatically without review
 
     class Config:
         schema_extra = {
@@ -164,7 +168,9 @@ class KnowledgeItemRequest(BaseModel):
                 "update_frequency": 7,
                 "max_depth": 2,
                 "extract_code_examples": True,
-                "use_new_pipeline": True,
+                "url_include_patterns": ["**/en/**"],
+                "url_exclude_patterns": ["**/fr/**", "**/de/**"],
+                "skip_link_review": False,
             }
         }
 
@@ -175,6 +181,27 @@ class CrawlRequest(BaseModel):
     tags: list[str] = []
     update_frequency: int = 7
     max_depth: int = 2  # Maximum crawl depth (1-5)
+    # Glob pattern filtering
+    url_include_patterns: list[str] = []  # Include URL patterns (e.g., ["**/en/**"])
+    url_exclude_patterns: list[str] = []  # Exclude URL patterns (e.g., ["**/fr/**", "**/de/**"])
+    # Link review mode
+    selected_urls: list[str] | None = None  # Specific URLs to crawl (from review modal)
+    skip_link_review: bool = False  # If True, apply patterns automatically without review
+
+
+class LinkPreviewRequest(BaseModel):
+    url: str
+    url_include_patterns: list[str] = []
+    url_exclude_patterns: list[str] = []
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "url": "https://docs.example.com/llms.txt",
+                "url_include_patterns": ["**/en/**"],
+                "url_exclude_patterns": ["**/fr/**", "**/de/**"],
+            }
+        }
 
 
 class RagQueryRequest(BaseModel):
@@ -187,7 +214,7 @@ class RagQueryRequest(BaseModel):
 @router.get("/crawl-progress/{progress_id}")
 async def get_crawl_progress(progress_id: str):
     """Get crawl progress for polling.
-
+    
     Returns the current state of a crawl operation.
     Frontend should poll this endpoint to track crawl progress.
     """
@@ -247,11 +274,15 @@ async def get_knowledge_items(
     try:
         # Use KnowledgeItemService
         service = KnowledgeItemService(get_supabase_client())
-        result = await service.list_items(page=page, per_page=per_page, knowledge_type=knowledge_type, search=search)
+        result = await service.list_items(
+            page=page, per_page=per_page, knowledge_type=knowledge_type, search=search
+        )
         return result
 
     except Exception as e:
-        safe_logfire_error(f"Failed to get knowledge items | error={str(e)} | page={page} | per_page={per_page}")
+        safe_logfire_error(
+            f"Failed to get knowledge items | error={str(e)} | page={page} | per_page={per_page}"
+        )
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
@@ -261,12 +292,12 @@ async def get_knowledge_items_summary(
 ):
     """
     Get lightweight summaries of knowledge items.
-
+    
     Returns minimal data optimized for frequent polling:
     - Only counts, no actual document/code content
     - Basic metadata for display
     - Efficient batch queries
-
+    
     Use this endpoint for card displays and frequent polling.
     """
     try:
@@ -274,11 +305,15 @@ async def get_knowledge_items_summary(
         page = max(1, page)
         per_page = min(100, max(1, per_page))
         service = KnowledgeSummaryService(get_supabase_client())
-        result = await service.get_summaries(page=page, per_page=per_page, knowledge_type=knowledge_type, search=search)
+        result = await service.get_summaries(
+            page=page, per_page=per_page, knowledge_type=knowledge_type, search=search
+        )
         return result
 
     except Exception as e:
-        safe_logfire_error(f"Failed to get knowledge summaries | error={str(e)} | page={page} | per_page={per_page}")
+        safe_logfire_error(
+            f"Failed to get knowledge summaries | error={str(e)} | page={page} | per_page={per_page}"
+        )
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
@@ -301,7 +336,9 @@ async def update_knowledge_item(source_id: str, updates: dict):
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"Failed to update knowledge item | error={str(e)} | source_id={source_id}")
+        safe_logfire_error(
+            f"Failed to update knowledge item | error={str(e)} | source_id={source_id}"
+        )
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
@@ -335,8 +372,12 @@ async def delete_knowledge_item(source_id: str):
 
             return {"success": True, "message": f"Successfully deleted knowledge item {source_id}"}
         else:
-            safe_logfire_error(f"Knowledge item deletion failed | source_id={source_id} | error={result.get('error')}")
-            raise HTTPException(status_code=500, detail={"error": result.get("error", "Deletion failed")})
+            safe_logfire_error(
+                f"Knowledge item deletion failed | source_id={source_id} | error={result.get('error')}"
+            )
+            raise HTTPException(
+                status_code=500, detail={"error": result.get("error", "Deletion failed")}
+            )
 
     except Exception as e:
         logger.error(f"Exception in delete_knowledge_item: {e}")
@@ -344,38 +385,48 @@ async def delete_knowledge_item(source_id: str):
         import traceback
 
         logger.error(f"Traceback: {traceback.format_exc()}")
-        safe_logfire_error(f"Failed to delete knowledge item | error={str(e)} | source_id={source_id}")
+        safe_logfire_error(
+            f"Failed to delete knowledge item | error={str(e)} | source_id={source_id}"
+        )
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
 @router.get("/knowledge-items/{source_id}/chunks")
-async def get_knowledge_item_chunks(source_id: str, domain_filter: str | None = None, limit: int = 20, offset: int = 0):
+async def get_knowledge_item_chunks(
+    source_id: str,
+    domain_filter: str | None = None,
+    limit: int = 20,
+    offset: int = 0
+):
     """
     Get document chunks for a specific knowledge item with pagination.
-
+    
     Args:
         source_id: The source ID
         domain_filter: Optional domain filter for URLs
         limit: Maximum number of chunks to return (default 20, max 100)
         offset: Number of chunks to skip (for pagination)
-
+    
     Returns:
         Paginated chunks with metadata
     """
     try:
         # Validate pagination parameters
         limit = min(limit, 100)  # Cap at 100 to prevent excessive data transfer
-        limit = max(limit, 1)  # At least 1
-        offset = max(offset, 0)  # Can't be negative
+        limit = max(limit, 1)    # At least 1
+        offset = max(offset, 0)   # Can't be negative
 
         safe_logfire_info(
-            f"Fetching chunks | source_id={source_id} | domain_filter={domain_filter} | limit={limit} | offset={offset}"
+            f"Fetching chunks | source_id={source_id} | domain_filter={domain_filter} | "
+            f"limit={limit} | offset={offset}"
         )
 
         supabase = get_supabase_client()
 
         # First get total count
-        count_query = supabase.from_("archon_crawled_pages").select("id", count="exact", head=True)
+        count_query = supabase.from_("archon_crawled_pages").select(
+            "id", count="exact", head=True
+        )
         count_query = count_query.eq("source_id", source_id)
 
         if domain_filter:
@@ -385,7 +436,9 @@ async def get_knowledge_item_chunks(source_id: str, domain_filter: str | None = 
         total = count_result.count if hasattr(count_result, "count") else 0
 
         # Build the main query with pagination
-        query = supabase.from_("archon_crawled_pages").select("id, source_id, content, metadata, url")
+        query = supabase.from_("archon_crawled_pages").select(
+            "id, source_id, content, metadata, url"
+        )
         query = query.eq("source_id", source_id)
 
         # Apply domain filtering if provided
@@ -401,7 +454,9 @@ async def get_knowledge_item_chunks(source_id: str, domain_filter: str | None = 
         result = query.execute()
         # Check for error more explicitly to work with mocks
         if hasattr(result, "error") and result.error is not None:
-            safe_logfire_error(f"Supabase query error | source_id={source_id} | error={result.error}")
+            safe_logfire_error(
+                f"Supabase query error | source_id={source_id} | error={result.error}"
+            )
             raise HTTPException(status_code=500, detail={"error": str(result.error)})
 
         chunks = result.data if result.data else []
@@ -444,17 +499,10 @@ async def get_knowledge_item_chunks(source_id: str, domain_filter: str | None = 
                         for line in lines:
                             line = line.strip()
                             # Skip code blocks, empty lines, and very short lines
-                            if (
-                                line
-                                and not line.startswith("```")
-                                and not line.startswith("Source:")
-                                and len(line) > 15
-                                and len(line) < 80
-                                and not line.startswith("from ")
-                                and not line.startswith("import ")
-                                and "=" not in line
-                                and "{" not in line
-                            ):
+                            if (line and not line.startswith("```") and not line.startswith("Source:")
+                                and len(line) > 15 and len(line) < 80
+                                and not line.startswith("from ") and not line.startswith("import ")
+                                and "=" not in line and "{" not in line):
                                 title = line
                                 break
 
@@ -478,7 +526,9 @@ async def get_knowledge_item_chunks(source_id: str, domain_filter: str | None = 
             chunk["source_type"] = metadata.get("source_type")
             chunk["knowledge_type"] = metadata.get("knowledge_type")
 
-        safe_logfire_info(f"Fetched {len(chunks)} chunks for {source_id} | total={total}")
+        safe_logfire_info(
+            f"Fetched {len(chunks)} chunks for {source_id} | total={total}"
+        )
 
         return {
             "success": True,
@@ -494,30 +544,38 @@ async def get_knowledge_item_chunks(source_id: str, domain_filter: str | None = 
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"Failed to fetch chunks | error={str(e)} | source_id={source_id}")
+        safe_logfire_error(
+            f"Failed to fetch chunks | error={str(e)} | source_id={source_id}"
+        )
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
 @router.get("/knowledge-items/{source_id}/code-examples")
-async def get_knowledge_item_code_examples(source_id: str, limit: int = 20, offset: int = 0):
+async def get_knowledge_item_code_examples(
+    source_id: str,
+    limit: int = 20,
+    offset: int = 0
+):
     """
     Get code examples for a specific knowledge item with pagination.
-
+    
     Args:
         source_id: The source ID
         limit: Maximum number of examples to return (default 20, max 100)
         offset: Number of examples to skip (for pagination)
-
+    
     Returns:
         Paginated code examples with metadata
     """
     try:
         # Validate pagination parameters
         limit = min(limit, 100)  # Cap at 100 to prevent excessive data transfer
-        limit = max(limit, 1)  # At least 1
-        offset = max(offset, 0)  # Can't be negative
+        limit = max(limit, 1)    # At least 1
+        offset = max(offset, 0)   # Can't be negative
 
-        safe_logfire_info(f"Fetching code examples | source_id={source_id} | limit={limit} | offset={offset}")
+        safe_logfire_info(
+            f"Fetching code examples | source_id={source_id} | limit={limit} | offset={offset}"
+        )
 
         supabase = get_supabase_client()
 
@@ -542,7 +600,9 @@ async def get_knowledge_item_code_examples(source_id: str, limit: int = 20, offs
 
         # Check for error to match chunks endpoint pattern
         if hasattr(result, "error") and result.error is not None:
-            safe_logfire_error(f"Supabase query error (code examples) | source_id={source_id} | error={result.error}")
+            safe_logfire_error(
+                f"Supabase query error (code examples) | source_id={source_id} | error={result.error}"
+            )
             raise HTTPException(status_code=500, detail={"error": str(result.error)})
 
         code_examples = result.data if result.data else []
@@ -559,7 +619,9 @@ async def get_knowledge_item_code_examples(source_id: str, limit: int = 20, offs
             # Note: content field is already at top level from database
             # Note: summary field is already at top level from database
 
-        safe_logfire_info(f"Fetched {len(code_examples)} code examples for {source_id} | total={total}")
+        safe_logfire_info(
+            f"Fetched {len(code_examples)} code examples for {source_id} | total={total}"
+        )
 
         return {
             "success": True,
@@ -572,21 +634,23 @@ async def get_knowledge_item_code_examples(source_id: str, limit: int = 20, offs
         }
 
     except Exception as e:
-        safe_logfire_error(f"Failed to fetch code examples | error={str(e)} | source_id={source_id}")
+        safe_logfire_error(
+            f"Failed to fetch code examples | error={str(e)} | source_id={source_id}"
+        )
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
 @router.post("/knowledge-items/{source_id}/refresh")
 async def refresh_knowledge_item(source_id: str):
     """Refresh a knowledge item by re-crawling its URL with the same metadata."""
-
+    
     # Validate API key before starting expensive refresh operation
     logger.info("🔍 About to validate API key for refresh...")
     provider_config = await credential_service.get_active_provider("embedding")
     provider = provider_config.get("provider", "openai")
     await _validate_provider_api_key(provider)
     logger.info("✅ API key validation completed successfully for refresh")
-
+    
     try:
         safe_logfire_info(f"Starting knowledge item refresh | source_id={source_id}")
 
@@ -595,7 +659,9 @@ async def refresh_knowledge_item(source_id: str):
         existing_item = await service.get_item(source_id)
 
         if not existing_item:
-            raise HTTPException(status_code=404, detail={"error": f"Knowledge item {source_id} not found"})
+            raise HTTPException(
+                status_code=404, detail={"error": f"Knowledge item {source_id} not found"}
+            )
 
         # Extract metadata
         metadata = existing_item.get("metadata", {})
@@ -604,7 +670,9 @@ async def refresh_knowledge_item(source_id: str):
         # First try to get the original URL from metadata, fallback to url field
         url = metadata.get("original_url") or existing_item.get("url")
         if not url:
-            raise HTTPException(status_code=400, detail={"error": "Knowledge item does not have a URL to refresh"})
+            raise HTTPException(
+                status_code=400, detail={"error": "Knowledge item does not have a URL to refresh"}
+            )
         knowledge_type = metadata.get("knowledge_type", "technical")
         tags = metadata.get("tags", [])
         max_depth = metadata.get("max_depth", 2)
@@ -614,19 +682,16 @@ async def refresh_knowledge_item(source_id: str):
 
         # Initialize progress tracker IMMEDIATELY so it's available for polling
         from ..utils.progress.progress_tracker import ProgressTracker
-
         tracker = ProgressTracker(progress_id, operation_type="crawl")
-        await tracker.start(
-            {
-                "url": url,
-                "status": "initializing",
-                "progress": 0,
-                "log": f"Starting refresh for {url}",
-                "source_id": source_id,
-                "operation": "refresh",
-                "crawl_type": "refresh",
-            }
-        )
+        await tracker.start({
+            "url": url,
+            "status": "initializing",
+            "progress": 0,
+            "log": f"Starting refresh for {url}",
+            "source_id": source_id,
+            "operation": "refresh",
+            "crawl_type": "refresh"
+        })
 
         # Get crawler from CrawlerManager - same pattern as _perform_crawl_with_progress
         try:
@@ -635,10 +700,14 @@ async def refresh_knowledge_item(source_id: str):
                 raise Exception("Crawler not available - initialization may have failed")
         except Exception as e:
             safe_logfire_error(f"Failed to get crawler | error={str(e)}")
-            raise HTTPException(status_code=500, detail={"error": f"Failed to initialize crawler: {str(e)}"})
+            raise HTTPException(
+                status_code=500, detail={"error": f"Failed to initialize crawler: {str(e)}"}
+            )
 
         # Use the same crawl orchestration as regular crawl
-        crawl_service = CrawlingService(crawler=crawler, supabase_client=get_supabase_client())
+        crawl_service = CrawlingService(
+            crawler=crawler, supabase_client=get_supabase_client()
+        )
         crawl_service.set_progress_id(progress_id)
 
         # Start the crawl task with proper request format
@@ -655,7 +724,9 @@ async def refresh_knowledge_item(source_id: str):
         async def _perform_refresh_with_semaphore():
             try:
                 async with crawl_semaphore:
-                    safe_logfire_info(f"Acquired crawl semaphore for refresh | source_id={source_id}")
+                    safe_logfire_info(
+                        f"Acquired crawl semaphore for refresh | source_id={source_id}"
+                    )
                     result = await crawl_service.orchestrate_crawl(request_dict)
 
                     # Store the ACTUAL crawl task for proper cancellation
@@ -669,7 +740,9 @@ async def refresh_knowledge_item(source_id: str):
                 # Clean up task from registry when done (success or failure)
                 if progress_id in active_crawl_tasks:
                     del active_crawl_tasks[progress_id]
-                    safe_logfire_info(f"Cleaned up refresh task from registry | progress_id={progress_id}")
+                    safe_logfire_info(
+                        f"Cleaned up refresh task from registry | progress_id={progress_id}"
+                    )
 
         # Start the wrapper task - we don't need to track it since we'll track the actual crawl task
         asyncio.create_task(_perform_refresh_with_semaphore())
@@ -679,340 +752,168 @@ async def refresh_knowledge_item(source_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"Failed to refresh knowledge item | error={str(e)} | source_id={source_id}")
-        raise HTTPException(status_code=500, detail={"error": str(e)})
-
-
-@router.post("/knowledge-items/{source_id}/revectorize")
-async def revectorize_knowledge_item(source_id: str):
-    """Re-generate embeddings for all documents in a knowledge item without re-crawling."""
-    from ..utils.progress.progress_tracker import ProgressTracker
-
-    logger.info(f"🔍 Starting re-vectorize for source_id={source_id}")
-
-    # Generate unique progress ID
-    progress_id = str(uuid.uuid4())
-
-    # Initialize progress tracker
-    tracker = ProgressTracker(progress_id, operation_type="revectorize")
-
-    try:
-        # Validate API key
-        provider_config = await credential_service.get_active_provider("embedding")
-        provider = provider_config.get("provider", "openai")
-        await _validate_provider_api_key(provider)
-
-        # Get the existing knowledge item
-        service = KnowledgeItemService(get_supabase_client())
-        existing_item = await service.get_item(source_id)
-
-        if not existing_item:
-            raise HTTPException(status_code=404, detail={"error": f"Knowledge item {source_id} not found"})
-
-        await tracker.start(
-            {
-                "status": "starting",
-                "progress": 0,
-                "log": f"Starting re-vectorization for {existing_item.get('title', source_id)}",
-                "documents_total": 0,
-                "documents_processed": 0,
-            }
+        safe_logfire_error(
+            f"Failed to refresh knowledge item | error={str(e)} | source_id={source_id}"
         )
-
-        # Start background task with semaphore
-        asyncio.create_task(_perform_revectorize_with_progress(progress_id, source_id, provider, tracker))
-
-        return {"success": True, "progressId": progress_id, "message": "Re-vectorization started"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        safe_logfire_error(f"Failed to start re-vectorize | error={str(e)} | source_id={source_id}")
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
-async def _perform_revectorize_with_progress(progress_id: str, source_id: str, provider: str, tracker):
-    """Perform the actual re-vectorize operation with progress tracking."""
-    async with revectorize_semaphore:
-        try:
-            from ..services.embeddings.embedding_service import create_embeddings_batch
-            from ..services.llm_provider_service import get_embedding_model
+@router.post("/crawl/preview-links")
+async def preview_link_collection(request: LinkPreviewRequest):
+    """
+    Preview links from a link collection (llms.txt, sitemap.xml) without crawling.
 
-            await tracker.update(
-                {
-                    "status": "processing",
-                    "progress": 5,
-                    "log": "Fetching documents...",
-                }
-            )
+    This endpoint fetches and parses link collection files to show what would be crawled,
+    allowing users to review and filter links before starting the actual crawl operation.
+    """
+    try:
+        # Validate URL
+        if not request.url:
+            raise HTTPException(status_code=422, detail="URL is required")
 
-            # Get current embedding settings for provenance
-            embedding_model = await get_embedding_model(provider=provider)
-            embedding_dimensions = 1536
+        if not request.url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=422, detail="URL must start with http:// or https://")
 
-            # Fetch all documents for this source
-            supabase = get_supabase_client()
-            docs_response = supabase.table("archon_crawled_pages").select("*").eq("source_id", source_id).execute()
+        # SSRF Protection: Validate URL to prevent internal network access
+        validate_url(request.url)
 
-            if not docs_response.data:
-                await tracker.error("No documents found for source")
-                return
+        # Input validation: Sanitize glob patterns
+        sanitized_include = sanitize_glob_patterns(request.url_include_patterns)
+        sanitized_exclude = sanitize_glob_patterns(request.url_exclude_patterns)
 
-            documents = docs_response.data
-            total_docs = len(documents)
+        safe_logfire_info(f"Preview link collection request | url={request.url}")
 
-            await tracker.update(
-                {
-                    "status": "processing",
-                    "progress": 10,
-                    "log": f"Found {total_docs} documents to re-vectorize",
-                    "documents_total": total_docs,
-                    "documents_processed": 0,
-                }
-            )
+        # Initialize crawler and service
+        crawler = await get_crawler()
+        if crawler is None:
+            raise HTTPException(status_code=500, detail="Crawler not available")
 
-            # Get current vectorizer settings for provenance
-            use_contextual = await credential_service.get_credential("USE_CONTEXTUAL_EMBEDDINGS", False)
-            use_hybrid = await credential_service.get_credential("USE_HYBRID_SEARCH", True)
-            chunk_size = await credential_service.get_credential("CHUNK_SIZE", 512)
+        crawling_service = CrawlingService(crawler=crawler, supabase_client=get_supabase_client())
 
-            vectorizer_settings = {"use_contextual": use_contextual, "use_hybrid": use_hybrid, "chunk_size": chunk_size}
+        # Detect link collection type
+        from ..services.crawling.helpers.url_handler import URLHandler
+        url_handler = URLHandler()
 
-            # Process documents in batches
-            batch_size = 100
-            total_updated = 0
-            errors = []
+        is_sitemap = url_handler.is_sitemap(request.url)
+        is_txt = url_handler.is_txt(request.url)
+        is_markdown = url_handler.is_markdown(request.url)
 
-            for i in range(0, len(documents), batch_size):
-                batch = documents[i : i + batch_size]
-                contents = [doc.get("content", "") or doc.get("markdown", "") for doc in batch]
+        # Track collection type
+        collection_type = None
+        links_data = []
 
-                # Create embeddings
-                result = await create_embeddings_batch(contents, provider=provider)
+        if is_sitemap:
+            # Parse sitemap
+            collection_type = "sitemap"
+            try:
+                # Run blocking parse_sitemap in thread pool to avoid blocking event loop
+                sitemap_urls = await asyncio.to_thread(crawling_service.parse_sitemap, request.url)
+                # Sitemaps don't have link text, just URLs
+                links_data = [(url, "") for url in sitemap_urls]
+            except Exception as e:
+                safe_logfire_error(f"Failed to parse sitemap: {e}")
+                raise HTTPException(status_code=400, detail=f"Failed to parse sitemap: {str(e)}")
 
-                if result.embeddings:
-                    # Update documents with new embeddings
-                    for j, (doc, embedding) in enumerate(zip(batch, result.embeddings, strict=False)):
-                        doc_id = doc.get("id")
-                        if not doc_id:
-                            continue
+        elif is_txt or is_markdown:
+            # Fetch text/markdown file with simple HTTP request (no browser needed)
+            collection_type = "llms-txt" if "llms" in request.url.lower() else "text_file"
+            try:
+                import aiohttp
 
-                        # Determine embedding column based on dimension
-                        embedding_dim = len(embedding) if isinstance(embedding, list) else 0
-                        embedding_column = None
-                        if embedding_dim == 768:
-                            embedding_column = "embedding_768"
-                        elif embedding_dim == 1024:
-                            embedding_column = "embedding_1024"
-                        elif embedding_dim == 1536:
-                            embedding_column = "embedding_1536"
-                        elif embedding_dim == 3072:
-                            embedding_column = "embedding_3072"
+                # Fetch file content with aiohttp (faster than full browser crawl)
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(request.url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                        if response.status != 200:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Failed to fetch file: HTTP {response.status}"
+                            )
+
+                        content = await response.text()
+
+                        if not content:
+                            raise HTTPException(status_code=400, detail="File content is empty")
+
+                        # Check if it's a link collection
+                        if url_handler.is_link_collection_file(request.url, content):
+                            # Extract links with text
+                            links_data = url_handler.extract_markdown_links_with_text(content, request.url)
                         else:
-                            errors.append(f"Unsupported dimension {embedding_dim} for doc {doc_id}")
-                            continue
+                            # Not a link collection
+                            return {
+                                "is_link_collection": False,
+                                "collection_type": None,
+                                "source_url": request.url,
+                                "message": "The provided URL is not a link collection file"
+                            }
 
-                        try:
-                            supabase.table("archon_crawled_pages").update(
-                                {
-                                    embedding_column: embedding,
-                                    "embedding_model": embedding_model,
-                                    "embedding_dimension": embedding_dim,
-                                }
-                            ).eq("id", doc_id).execute()
-                            total_updated += 1
-                        except Exception as e:
-                            errors.append(f"Failed to update doc {doc_id}: {str(e)}")
+            except aiohttp.ClientError as e:
+                safe_logfire_error(f"Failed to fetch text file: {e}")
+                raise HTTPException(status_code=400, detail=f"Failed to fetch file: {str(e)}")
+            except Exception as e:
+                safe_logfire_error(f"Failed to fetch text file: {e}")
+                raise HTTPException(status_code=400, detail=f"Failed to fetch file: {str(e)}")
 
-                # Update progress
-                progress = 10 + int((i + len(batch)) / total_docs * 85)
-                await tracker.update(
-                    {
-                        "status": "processing",
-                        "progress": progress,
-                        "log": f"Processed {min(i + len(batch), total_docs)}/{total_docs} documents",
-                        "documents_total": total_docs,
-                        "documents_processed": min(i + len(batch), total_docs),
-                    }
-                )
+        else:
+            # Not a recognized link collection type
+            return {
+                "is_link_collection": False,
+                "collection_type": None,
+                "source_url": request.url,
+                "message": "The provided URL does not appear to be a link collection (expected: sitemap.xml, llms.txt, or similar)"
+            }
 
-            # Update source provenance
-            supabase.table("archon_sources").update(
-                {
-                    "embedding_model": embedding_model,
-                    "embedding_dimensions": embedding_dim,
-                    "embedding_provider": provider,
-                    "vectorizer_settings": vectorizer_settings,
-                    "last_vectorized_at": datetime.utcnow().isoformat(),
-                    "needs_revectorization": False,
-                }
-            ).eq("id", source_id).execute()
+        # Filter out binary files and self-referential links
+        filtered_links_data = []
+        for link, text in links_data:
+            if not url_handler.is_binary_file(link):
+                filtered_links_data.append((link, text))
 
-            await tracker.complete(
-                {
-                    "log": f"Re-vectorization complete: {total_updated} documents updated",
-                    "documents_total": total_updated,
-                    "documents_processed": total_updated,
-                }
+        # Apply glob patterns and build response
+        from urllib.parse import urlparse
+        response_links = []
+
+        for link, text in filtered_links_data:
+            # Parse URL to extract path
+            parsed = urlparse(link)
+            path = parsed.path
+
+            # Check if link matches glob patterns (use sanitized patterns)
+            matches_filter = url_handler.matches_glob_patterns(
+                link,
+                sanitized_include if sanitized_include else None,
+                sanitized_exclude if sanitized_exclude else None
             )
 
-            logger.info(f"✅ Re-vectorize complete: {total_updated} documents updated")
+            response_links.append({
+                "url": link,
+                "text": text if text else "",
+                "path": path,
+                "matches_filter": matches_filter
+            })
 
-        except Exception as e:
-            safe_logfire_error(f"Failed to re-vectorize | error={str(e)} | source_id={source_id}")
-            await tracker.error(f"Re-vectorization failed: {str(e)}")
+        # Count matching links
+        matching_count = sum(1 for link in response_links if link["matches_filter"])
 
-
-@router.post("/knowledge-items/{source_id}/resummarize")
-async def resummarize_knowledge_item(source_id: str):
-    """Re-generate summaries for all code examples in a knowledge item without re-crawling."""
-    from ..utils.progress.progress_tracker import ProgressTracker
-
-    logger.info(f"🔍 Starting re-summarize for source_id={source_id}")
-
-    # Generate unique progress ID
-    progress_id = str(uuid.uuid4())
-
-    # Initialize progress tracker
-    tracker = ProgressTracker(progress_id, operation_type="resummarize")
-
-    try:
-        # Validate API key (uses LLM provider for summarization)
-        provider_config = await credential_service.get_active_provider("llm")
-        provider = provider_config.get("provider", "openai")
-        await _validate_provider_api_key(provider)
-
-        # Get the existing knowledge item
-        service = KnowledgeItemService(get_supabase_client())
-        existing_item = await service.get_item(source_id)
-
-        if not existing_item:
-            raise HTTPException(status_code=404, detail={"error": f"Knowledge item {source_id} not found"})
-
-        await tracker.start(
-            {
-                "status": "starting",
-                "progress": 0,
-                "log": f"Starting re-summarization for {existing_item.get('title', source_id)}",
-                "examples_total": 0,
-                "examples_processed": 0,
-            }
+        safe_logfire_info(
+            f"Preview completed | collection_type={collection_type} | "
+            f"total_links={len(response_links)} | matching={matching_count}"
         )
 
-        # Start background task with semaphore
-        asyncio.create_task(_perform_resummarize_with_progress(progress_id, source_id, tracker))
-
-        return {"success": True, "progressId": progress_id, "message": "Re-summarization started"}
+        return {
+            "is_link_collection": True,
+            "collection_type": collection_type,
+            "source_url": request.url,
+            "total_links": len(response_links),
+            "matching_links": matching_count,
+            "links": response_links
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"Failed to start re-summarize | error={str(e)} | source_id={source_id}")
-        raise HTTPException(status_code=500, detail={"error": str(e)})
-
-
-async def _perform_resummarize_with_progress(progress_id: str, source_id: str, tracker):
-    """Perform the actual re-summarize operation with progress tracking."""
-    async with resummarize_semaphore:
-        try:
-            from ..services.storage.code_storage_service import _get_model_choice, generate_code_summaries_batch
-
-            await tracker.update(
-                {
-                    "status": "processing",
-                    "progress": 5,
-                    "log": "Fetching code examples...",
-                }
-            )
-
-            # Fetch all code examples for this source
-            supabase = get_supabase_client()
-            code_response = supabase.table("archon_code_examples").select("*").eq("source_id", source_id).execute()
-
-            if not code_response.data:
-                await tracker.error("No code examples found for source")
-                return
-
-            code_examples = code_response.data
-            total_examples = len(code_examples)
-
-            await tracker.update(
-                {
-                    "status": "processing",
-                    "progress": 10,
-                    "log": f"Found {total_examples} code examples to re-summarize",
-                    "examples_total": total_examples,
-                    "examples_processed": 0,
-                }
-            )
-
-            # Get code summarization model
-            code_summarization_model = await _get_model_choice()
-
-            # Prepare code blocks for summarization
-            code_blocks = []
-            for example in code_examples:
-                code_blocks.append(
-                    {
-                        "code": example.get("content", ""),
-                        "context_before": "",
-                        "context_after": "",
-                        "language": example.get("metadata", {}).get("language", ""),
-                    }
-                )
-
-            # Generate new summaries
-            max_workers = int(await credential_service.get_credential("CODE_SUMMARY_MAX_WORKERS", 3))
-            summary_results = await generate_code_summaries_batch(code_blocks, max_workers=max_workers)
-
-            # Update code examples with new summaries
-            total_updated = 0
-            errors = []
-
-            for idx, (example, summary) in enumerate(zip(code_examples, summary_results, strict=False)):
-                example_id = example.get("id")
-                if not example_id:
-                    continue
-
-                try:
-                    supabase.table("archon_code_examples").update(
-                        {"summary": summary.get("summary", ""), "llm_chat_model": code_summarization_model}
-                    ).eq("id", example_id).execute()
-                    total_updated += 1
-                except Exception as e:
-                    errors.append(f"Failed to update example {example_id}: {str(e)}")
-
-                # Update progress every 10 examples
-                if idx % 10 == 0 or idx == len(code_examples) - 1:
-                    progress = 10 + int((idx + 1) / total_examples * 85)
-                    await tracker.update(
-                        {
-                            "status": "processing",
-                            "progress": progress,
-                            "log": f"Processed {idx + 1}/{total_examples} code examples",
-                            "examples_total": total_examples,
-                            "examples_processed": idx + 1,
-                        }
-                    )
-
-            # Update source provenance
-            supabase.table("archon_sources").update({"summarization_model": code_summarization_model}).eq(
-                "id", source_id
-            ).execute()
-
-            await tracker.complete(
-                {
-                    "log": f"Re-summarization complete: {total_updated} code examples updated",
-                    "examples_total": total_updated,
-                    "examples_processed": total_updated,
-                }
-            )
-
-            logger.info(f"✅ Re-summarize complete: {total_updated} code examples updated")
-
-        except Exception as e:
-            safe_logfire_error(f"Failed to re-summarize | error={str(e)} | source_id={source_id}")
-            await tracker.error(f"Re-summarization failed: {str(e)}")
+        safe_logfire_error(f"Failed to preview link collection | error={str(e)} | url={request.url}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/knowledge-items/crawl")
@@ -1042,7 +943,6 @@ async def crawl_knowledge_item(request: KnowledgeItemRequest):
 
         # Initialize progress tracker IMMEDIATELY so it's available for polling
         from ..utils.progress.progress_tracker import ProgressTracker
-
         tracker = ProgressTracker(progress_id, operation_type="crawl")
 
         # Detect crawl type from URL
@@ -1053,21 +953,21 @@ async def crawl_knowledge_item(request: KnowledgeItemRequest):
         elif url_str.endswith(".txt"):
             crawl_type = "llms-txt" if "llms" in url_str.lower() else "text_file"
 
-        await tracker.start(
-            {
-                "url": url_str,
-                "current_url": url_str,
-                "crawl_type": crawl_type,
-                # Don't override status - let tracker.start() set it to "starting"
-                "progress": 0,
-                "log": f"Starting crawl for {request.url}",
-            }
-        )
+        await tracker.start({
+            "url": url_str,
+            "current_url": url_str,
+            "crawl_type": crawl_type,
+            # Don't override status - let tracker.start() set it to "starting"
+            "progress": 0,
+            "log": f"Starting crawl for {request.url}"
+        })
 
         # Start background task - no need to track this wrapper task
         # The actual crawl task will be stored inside _perform_crawl_with_progress
         asyncio.create_task(_perform_crawl_with_progress(progress_id, request, tracker))
-        safe_logfire_info(f"Crawl started successfully | progress_id={progress_id} | url={str(request.url)}")
+        safe_logfire_info(
+            f"Crawl started successfully | progress_id={progress_id} | url={str(request.url)}"
+        )
         # Create a proper response that will be converted to camelCase
         from pydantic import BaseModel, Field
 
@@ -1081,7 +981,10 @@ async def crawl_knowledge_item(request: KnowledgeItemRequest):
                 populate_by_name = True
 
         response = CrawlStartResponse(
-            success=True, progress_id=progress_id, message="Crawling started", estimated_duration="3-5 minutes"
+            success=True,
+            progress_id=progress_id,
+            message="Crawling started",
+            estimated_duration="3-5 minutes"
         )
 
         return response.model_dump(by_alias=True)
@@ -1090,11 +993,15 @@ async def crawl_knowledge_item(request: KnowledgeItemRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def _perform_crawl_with_progress(progress_id: str, request: KnowledgeItemRequest, tracker):
+async def _perform_crawl_with_progress(
+    progress_id: str, request: KnowledgeItemRequest, tracker
+):
     """Perform the actual crawl operation with progress tracking using service layer."""
     # Acquire semaphore to limit concurrent crawls
     async with crawl_semaphore:
-        safe_logfire_info(f"Acquired crawl semaphore | progress_id={progress_id} | url={str(request.url)}")
+        safe_logfire_info(
+            f"Acquired crawl semaphore | progress_id={progress_id} | url={str(request.url)}"
+        )
         try:
             safe_logfire_info(
                 f"Starting crawl with progress tracking | progress_id={progress_id} | url={str(request.url)}"
@@ -1122,7 +1029,10 @@ async def _perform_crawl_with_progress(progress_id: str, request: KnowledgeItemR
                 "max_depth": request.max_depth,
                 "extract_code_examples": request.extract_code_examples,
                 "generate_summary": True,
-                "use_new_pipeline": request.use_new_pipeline,
+                "url_include_patterns": request.url_include_patterns,
+                "url_exclude_patterns": request.url_exclude_patterns,
+                "selected_urls": request.selected_urls,
+                "skip_link_review": request.skip_link_review,
             }
 
             # Orchestrate the crawl - this returns immediately with task info including the actual task
@@ -1139,7 +1049,9 @@ async def _perform_crawl_with_progress(progress_id: str, request: KnowledgeItemR
                 safe_logfire_error(f"No task returned from orchestrate_crawl | progress_id={progress_id}")
 
             # The orchestration service now runs in background and handles all progress updates
-            safe_logfire_info(f"Crawl task started | progress_id={progress_id} | task_id={result.get('task_id')}")
+            safe_logfire_info(
+                f"Crawl task started | progress_id={progress_id} | task_id={result.get('task_id')}"
+            )
         except asyncio.CancelledError:
             safe_logfire_info(f"Crawl cancelled | progress_id={progress_id}")
             raise
@@ -1167,7 +1079,9 @@ async def _perform_crawl_with_progress(progress_id: str, request: KnowledgeItemR
             # Clean up task from registry when done (success or failure)
             if progress_id in active_crawl_tasks:
                 del active_crawl_tasks[progress_id]
-                safe_logfire_info(f"Cleaned up crawl task from registry | progress_id={progress_id}")
+                safe_logfire_info(
+                    f"Cleaned up crawl task from registry | progress_id={progress_id}"
+                )
 
 
 @router.post("/documents/upload")
@@ -1178,14 +1092,14 @@ async def upload_document(
     extract_code_examples: bool = Form(True),
 ):
     """Upload and process a document with progress tracking."""
-
-    # Validate API key before starting expensive upload operation
+    
+    # Validate API key before starting expensive upload operation  
     logger.info("🔍 About to validate API key for upload...")
     provider_config = await credential_service.get_active_provider("embedding")
     provider = provider_config.get("provider", "openai")
     await _validate_provider_api_key(provider)
     logger.info("✅ API key validation completed successfully for upload")
-
+    
     try:
         # DETAILED LOGGING: Track knowledge_type parameter flow
         safe_logfire_info(
@@ -1218,16 +1132,13 @@ async def upload_document(
 
         # Initialize progress tracker IMMEDIATELY so it's available for polling
         from ..utils.progress.progress_tracker import ProgressTracker
-
         tracker = ProgressTracker(progress_id, operation_type="upload")
-        await tracker.start(
-            {
-                "filename": file.filename,
-                "status": "initializing",
-                "progress": 0,
-                "log": f"Starting upload for {file.filename}",
-            }
-        )
+        await tracker.start({
+            "filename": file.filename,
+            "status": "initializing",
+            "progress": 0,
+            "log": f"Starting upload for {file.filename}"
+        })
         # Start background task for processing with file content and metadata
         # Upload tasks can be tracked directly since they don't spawn sub-tasks
         upload_task = asyncio.create_task(
@@ -1264,7 +1175,6 @@ async def _perform_upload_with_progress(
     tracker: "ProgressTracker",
 ):
     """Perform document upload with progress tracking using service layer."""
-
     # Create cancellation check function for document uploads
     def check_upload_cancellation():
         """Check if upload task has been cancelled."""
@@ -1274,7 +1184,6 @@ async def _perform_upload_with_progress(
 
     # Import ProgressMapper to prevent progress from going backwards
     from ..services.crawling.progress_mapper import ProgressMapper
-
     progress_mapper = ProgressMapper()
 
     try:
@@ -1286,9 +1195,14 @@ async def _perform_upload_with_progress(
             f"Starting document upload with progress tracking | progress_id={progress_id} | filename={filename} | content_type={content_type}"
         )
 
+
         # Extract text from document with progress - use mapper for consistent progress
         mapped_progress = progress_mapper.map_progress("processing", 50)
-        await tracker.update(status="processing", progress=mapped_progress, log=f"Extracting text from {filename}")
+        await tracker.update(
+            status="processing",
+            progress=mapped_progress,
+            log=f"Extracting text from {filename}"
+        )
 
         try:
             extracted_text = extract_text_from_document(file_content, filename, content_type)
@@ -1330,7 +1244,9 @@ async def _perform_upload_with_progress(
                 log=message,
                 currentUrl=f"file://{filename}",
                 **(batch_info or {}),
+                **extra_fields,
             )
+
 
         # Call the service's upload_document method
         success, result = await doc_storage_service.upload_document(
@@ -1346,14 +1262,12 @@ async def _perform_upload_with_progress(
 
         if success:
             # Complete the upload with 100% progress
-            await tracker.complete(
-                {
-                    "log": "Document uploaded successfully!",
-                    "chunks_stored": result.get("chunks_stored"),
-                    "code_examples_stored": result.get("code_examples_stored", 0),
-                    "sourceId": result.get("source_id"),
-                }
-            )
+            await tracker.complete({
+                "log": "Document uploaded successfully!",
+                "chunks_stored": result.get("chunks_stored"),
+                "code_examples_stored": result.get("code_examples_stored", 0),
+                "sourceId": result.get("source_id"),
+            })
             safe_logfire_info(
                 f"Document uploaded successfully | progress_id={progress_id} | source_id={result.get('source_id')} | chunks_stored={result.get('chunks_stored')} | code_examples_stored={result.get('code_examples_stored', 0)}"
             )
@@ -1403,7 +1317,10 @@ async def perform_rag_query(request: RagQueryRequest):
         # Use RAGService for unified RAG query with return_mode support
         search_service = RAGService(get_supabase_client())
         success, result = await search_service.perform_rag_query(
-            query=request.query, source=request.source, match_count=request.match_count, return_mode=request.return_mode
+            query=request.query,
+            source=request.source,
+            match_count=request.match_count,
+            return_mode=request.return_mode
         )
 
         if success:
@@ -1411,11 +1328,15 @@ async def perform_rag_query(request: RagQueryRequest):
             result["success"] = True
             return result
         else:
-            raise HTTPException(status_code=500, detail={"error": result.get("error", "RAG query failed")})
+            raise HTTPException(
+                status_code=500, detail={"error": result.get("error", "RAG query failed")}
+            )
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"RAG query failed | error={str(e)} | query={request.query[:50]} | source={request.source}")
+        safe_logfire_error(
+            f"RAG query failed | error={str(e)} | query={request.query[:50]} | source={request.source}"
+        )
         raise HTTPException(status_code=500, detail={"error": f"RAG query failed: {str(e)}"})
 
 
@@ -1450,7 +1371,9 @@ async def search_code_examples(request: RagQueryRequest):
         safe_logfire_error(
             f"Code examples search failed | error={str(e)} | query={request.query[:50]} | source={request.source}"
         )
-        raise HTTPException(status_code=500, detail={"error": f"Code examples search failed: {str(e)}"})
+        raise HTTPException(
+            status_code=500, detail={"error": f"Code examples search failed: {str(e)}"}
+        )
 
 
 @router.post("/code-examples")
@@ -1500,8 +1423,12 @@ async def delete_source(source_id: str):
                 **result_data,
             }
         else:
-            safe_logfire_error(f"Source deletion failed | source_id={source_id} | error={result_data.get('error')}")
-            raise HTTPException(status_code=500, detail={"error": result_data.get("error", "Deletion failed")})
+            safe_logfire_error(
+                f"Source deletion failed | source_id={source_id} | error={result_data.get('error')}"
+            )
+            raise HTTPException(
+                status_code=500, detail={"error": result_data.get("error", "Deletion failed")}
+            )
     except HTTPException:
         raise
     except Exception as e:
@@ -1526,9 +1453,9 @@ async def get_database_metrics():
 async def knowledge_health():
     """Knowledge API health check with migration detection."""
     # Check for database migration needs
-    from ..main import _check_database_schema_cached
+    from ..main import _check_database_schema
 
-    schema_status = await _check_database_schema_cached()
+    schema_status = await _check_database_schema()
     if not schema_status["valid"]:
         return {
             "status": "migration_required",
@@ -1537,7 +1464,7 @@ async def knowledge_health():
             "ready": False,
             "migration_required": True,
             "message": schema_status["message"],
-            "migration_instructions": "Open Supabase Dashboard → SQL Editor → Run: migration/add_source_url_display_name.sql",
+            "migration_instructions": "Open Supabase Dashboard → SQL Editor → Run: migration/add_source_url_display_name.sql"
         }
 
     # Removed health check logging to reduce console noise
@@ -1550,11 +1477,13 @@ async def knowledge_health():
     return result
 
 
+
 @router.post("/knowledge-items/stop/{progress_id}")
 async def stop_crawl_task(progress_id: str):
     """Stop a running crawl task."""
     try:
         from ..services.crawling import get_active_orchestration, unregister_orchestration
+
 
         safe_logfire_info(f"Stop crawl requested | progress_id={progress_id}")
 
@@ -1584,13 +1513,16 @@ async def stop_crawl_task(progress_id: str):
         if found:
             try:
                 from ..utils.progress.progress_tracker import ProgressTracker
-
                 # Get current progress from existing tracker, default to 0 if not found
                 current_state = ProgressTracker.get_progress(progress_id)
                 current_progress = current_state.get("progress", 0) if current_state else 0
 
                 tracker = ProgressTracker(progress_id, operation_type="crawl")
-                await tracker.update(status="cancelled", progress=current_progress, log="Crawl cancelled by user")
+                await tracker.update(
+                    status="cancelled",
+                    progress=current_progress,
+                    log="Crawl cancelled by user"
+                )
             except Exception:
                 # Best effort - don't fail the cancellation if tracker update fails
                 pass
@@ -1608,129 +1540,55 @@ async def stop_crawl_task(progress_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"Failed to stop crawl task | error={str(e)} | progress_id={progress_id}")
+        safe_logfire_error(
+            f"Failed to stop crawl task | error={str(e)} | progress_id={progress_id}"
+        )
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
 @router.post("/knowledge-items/pause/{progress_id}")
-async def pause_operation(progress_id: str):
-    """Pause an ongoing operation."""
+async def pause_crawl_task(progress_id: str):
+    """Pause a running crawl task."""
     try:
-        from ..utils.progress.progress_tracker import ProgressTracker
-
-        safe_logfire_info(f"Pause requested | progress_id={progress_id}")
-
-        # Check if operation exists
-        progress_data = ProgressTracker.get_progress(progress_id)
-        if not progress_data:
-            raise HTTPException(status_code=404, detail={"error": f"No operation found for ID: {progress_id}"})
-
-        # Check if operation is in a pausable state
-        current_status = progress_data.get("status") if progress_data else None
-        if current_status not in ["starting", "in_progress", "crawling"]:
-            raise HTTPException(
-                status_code=400, detail={"error": f"Cannot pause operation in status: {current_status}"}
-            )
-
-        # Pause the operation
-        success = await ProgressTracker.pause_operation(progress_id)
-
-        if not success:
-            raise HTTPException(status_code=500, detail={"error": "Failed to pause operation"})
-
-        # Pause the orchestration task if running
         from ..services.crawling import get_active_orchestration
-
+        safe_logfire_info(f"Pause crawl requested | progress_id={progress_id}")
+        
         orchestration = await get_active_orchestration(progress_id)
         if orchestration:
             orchestration.pause()
-
-        safe_logfire_info(f"Operation paused | progress_id={progress_id}")
-        return {
-            "success": True,
-            "message": "Operation paused successfully",
-            "progressId": progress_id,
-        }
-
+            return {
+                "success": True,
+                "message": "Crawl task paused successfully",
+                "progressId": progress_id,
+            }
+        else:
+            raise HTTPException(status_code=404, detail={"error": "No active task for given progress_id"})
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"Failed to pause operation | error={str(e)} | progress_id={progress_id}")
+        safe_logfire_error(f"Failed to pause crawl task | error={str(e)} | progress_id={progress_id}")
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
 @router.post("/knowledge-items/resume/{progress_id}")
-async def resume_operation(progress_id: str):
-    """Resume a paused operation."""
+async def resume_crawl_task(progress_id: str):
+    """Resume a paused crawl task."""
     try:
-        from ..utils.progress.progress_tracker import ProgressTracker
-
-        safe_logfire_info(f"Resume requested | progress_id={progress_id}")
-
-        # Check if operation exists and is paused
-        progress_data = ProgressTracker.get_progress(progress_id)
-        if not progress_data:
-            raise HTTPException(status_code=404, detail={"error": f"No operation found for ID: {progress_id}"})
-
-        # Check if operation is in a resumable state
-        # Allow resuming from paused, in_progress, crawling, or failed states
-        # Failed operations can be retried to recover from DB failures or other issues
-        current_status = progress_data.get("status")
-        if current_status not in ["paused", "in_progress", "crawling", "failed"]:
-            raise HTTPException(
-                status_code=400, detail={"error": f"Cannot resume operation in status: {current_status}"}
-            )
-
-        # Resume the operation
-        success = await ProgressTracker.resume_operation(progress_id)
-
-        if not success:
-            raise HTTPException(status_code=500, detail={"error": "Failed to resume operation"})
-
-        # Get source_id and operation_type to restart the crawl
-        source_id = progress_data.get("source_id")
-        operation_type = progress_data.get("type", "crawl")
-
-        # Restart the actual operation based on type
-        if operation_type == "crawl" and source_id:
-            from ..services.crawling.crawling_service import CrawlingService
-
-            supabase = get_supabase_client()
-
-            source_result = (
-                supabase.table("archon_sources").select("source_url, metadata").eq("source_id", source_id).execute()
-            )
-
-            if source_result.data and len(source_result.data) > 0:
-                source_url = source_result.data[0].get("source_url")
-                metadata = source_result.data[0].get("metadata", {})
-
-                crawl_request = {
-                    "url": source_url,
-                    "knowledge_type": metadata.get("knowledge_type", "website"),
-                    "tags": metadata.get("tags", []),
-                    "max_depth": metadata.get("max_depth", 3),
-                    "allow_external_links": metadata.get("allow_external_links", False),
-                }
-
-                crawl_service = CrawlingService(supabase_client=supabase, progress_id=progress_id)
-                await crawl_service.orchestrate_crawl(crawl_request)
-                safe_logfire_info(
-                    f"Restarted crawl | progress_id={progress_id} | source_id={source_id} | url={source_url}"
-                )
-            else:
-                safe_logfire_warning(f"Source not found for resume | source_id={source_id}")
-
-        safe_logfire_info(f"Operation resumed | progress_id={progress_id} | source_id={source_id}")
-        return {
-            "success": True,
-            "message": "Operation resumed successfully",
-            "progressId": progress_id,
-            "sourceId": source_id,
-        }
-
+        from ..services.crawling import get_active_orchestration
+        safe_logfire_info(f"Resume crawl requested | progress_id={progress_id}")
+        
+        orchestration = await get_active_orchestration(progress_id)
+        if orchestration:
+            orchestration.resume()
+            return {
+                "success": True,
+                "message": "Crawl task resumed successfully",
+                "progressId": progress_id,
+            }
+        else:
+            raise HTTPException(status_code=404, detail={"error": "No active task for given progress_id"})
     except HTTPException:
         raise
     except Exception as e:
-        safe_logfire_error(f"Failed to resume operation | error={str(e)} | progress_id={progress_id}")
+        safe_logfire_error(f"Failed to resume crawl task | error={str(e)} | progress_id={progress_id}")
         raise HTTPException(status_code=500, detail={"error": str(e)})
