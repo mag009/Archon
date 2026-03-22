@@ -38,6 +38,7 @@ from .api_routes.settings_api import router as settings_router
 from .api_routes.version_api import router as version_router
 
 # Import Logfire configuration
+from .config.config import get_config
 from .config.logfire_config import api_logger, setup_logfire
 from .services.crawler_manager import cleanup_crawler, initialize_crawler
 

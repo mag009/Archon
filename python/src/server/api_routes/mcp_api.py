@@ -197,14 +197,22 @@ async def get_mcp_config():
         try:
             api_logger.info("Getting MCP server configuration")
 
-            # Get actual MCP port from environment or use default
-            mcp_port = int(os.getenv("ARCHON_MCP_PORT", "8051"))
+            # Get MCP configuration from environment variables for external access
+            # Default to provided values if not specified
+            host = os.getenv("MCP_EXTERNAL_HOST", "localhost")
+            port_str = os.getenv("MCP_EXTERNAL_PORT", "443")
+            protocol = os.getenv("MCP_EXTERNAL_PROTOCOL", "https")
+            
+            try:
+                port = int(port_str)
+            except (ValueError, TypeError):
+                port = 443
 
-            # Configuration for streamable-http mode with actual port
             config = {
-                "host": os.getenv("ARCHON_HOST", "localhost"),
-                "port": mcp_port,
+                "host": host,
+                "port": port,
                 "transport": "streamable-http",
+                "protocol": protocol,
             }
 
             # Get only model choice from database (simplified)
@@ -217,10 +225,10 @@ async def get_mcp_config():
                 # Fallback to default model
                 config["model_choice"] = "gpt-4o-mini"
 
-            api_logger.info("MCP configuration (streamable-http mode)")
+            api_logger.info(f"MCP configuration ({config['transport']} mode)")
             safe_set_attribute(span, "host", config["host"])
             safe_set_attribute(span, "port", config["port"])
-            safe_set_attribute(span, "transport", "streamable-http")
+            safe_set_attribute(span, "transport", config["transport"])
             safe_set_attribute(span, "model_choice", config.get("model_choice", "gpt-4o-mini"))
 
             return config

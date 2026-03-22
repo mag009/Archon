@@ -17,7 +17,7 @@ export default defineConfig(({ mode }: ConfigEnv): UserConfig => {
   // For internal Docker communication, use the service name
   // For external access, use the HOST from environment
   const isDocker = process.env.DOCKER_ENV === 'true' || existsSync('/.dockerenv');
-  const internalHost = 'archon-server';  // Docker service name for internal communication
+  const internalHost = 'archon-api';  // Docker service name for internal communication
   const externalHost = process.env.HOST || 'localhost';  // Host for external access
   // CRITICAL: For proxy target, always use internal host in Docker
   const proxyHost = isDocker ? internalHost : externalHost;

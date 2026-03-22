@@ -78,7 +78,8 @@ export interface OllamaInstance {
 import { getApiUrl } from "../config/api";
 
 class CredentialsService {
-  private baseUrl = getApiUrl();
+  // Use relative URLs to work with proxy in all environments
+  private baseUrl = '';
 
   private notifyCredentialUpdate(keys: string[]): void {
     if (typeof window === "undefined") {

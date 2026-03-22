@@ -29,30 +29,10 @@ class ServiceDiscovery:
 
     def __init__(self):
         # Get ports during initialization
-        server_port = os.getenv("ARCHON_SERVER_PORT")
-        mcp_port = os.getenv("ARCHON_MCP_PORT")
-        agents_port = os.getenv("ARCHON_AGENTS_PORT")
+        server_port = os.getenv("ARCHON_SERVER_PORT", "8181")
+        mcp_port = os.getenv("ARCHON_MCP_PORT", "8051")
+        agents_port = os.getenv("ARCHON_AGENTS_PORT", "8052")
         agent_work_orders_port = os.getenv("AGENT_WORK_ORDERS_PORT")
-
-        # Required ports (core services)
-        if not server_port:
-            raise ValueError(
-                "ARCHON_SERVER_PORT environment variable is required. "
-                "Please set it in your .env file or environment. "
-                "Default value: 8181"
-            )
-        if not mcp_port:
-            raise ValueError(
-                "ARCHON_MCP_PORT environment variable is required. "
-                "Please set it in your .env file or environment. "
-                "Default value: 8051"
-            )
-        if not agents_port:
-            raise ValueError(
-                "ARCHON_AGENTS_PORT environment variable is required. "
-                "Please set it in your .env file or environment. "
-                "Default value: 8052"
-            )
 
         # Optional ports (agent_work_orders is an optional feature)
         # Store None if not configured to indicate feature is unavailable
@@ -68,11 +48,12 @@ class ServiceDiscovery:
 
     # Service name mappings
     SERVICE_NAMES = {
-        "api": "archon-server",
+        "api": "archon-api",
         "mcp": "archon-mcp",
         "agents": "archon-agents",
         "agent_work_orders": "archon-agent-work-orders",
-        "archon-server": "archon-server",
+        "archon-api": "archon-api",
+        "archon-server": "archon-api",
         "archon-mcp": "archon-mcp",
         "archon-agents": "archon-agents",
         "archon-agent-work-orders": "archon-agent-work-orders",
@@ -125,14 +106,26 @@ class ServiceDiscovery:
             return None
 
         if self.environment == Environment.DOCKER_COMPOSE:
-            # Docker Compose uses service names directly
-            # Check for override via environment variable
-            host = os.getenv(f"{service_name.upper().replace('-', '_')}_HOST", service_name)
-            url = f"{protocol}://{host}:{port}"
+            # For MCP service, check if proxy mode is enabled for external access
+            if service == "mcp" and os.getenv("VITE_MCP_USE_PROXY", "false").lower() == "true":
+                # Use external host and protocol for proxy mode
+                external_host = os.getenv("HOST", "localhost")
+                external_protocol = os.getenv("VITE_MCP_PROTOCOL", protocol)
+                url = f"{external_protocol}://{external_host}:{port}"
+            else:
+                # Docker Compose uses service names directly
+                # Check for override via environment variable
+                host = os.getenv(f"{service_name.upper().replace('-', '_')}_HOST", service_name)
+                url = f"{protocol}://{host}:{port}"
 
         else:
             # Local development - everything on localhost
-            url = f"{protocol}://localhost:{port}"
+            # Use environment variables if available
+            host = os.getenv("HOST", "localhost")
+            # For MCP in local mode, respect the protocol setting
+            if service == "mcp":
+                protocol = os.getenv("VITE_MCP_PROTOCOL", protocol)
+            url = f"{protocol}://{host}:{port}"
 
         self._cache[cache_key] = url
         return url

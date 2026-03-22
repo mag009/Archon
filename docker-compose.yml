@@ -29,7 +29,12 @@ services:
       - ARCHON_AGENTS_PORT=${ARCHON_AGENTS_PORT:-8052}
       - AGENT_WORK_ORDERS_PORT=${AGENT_WORK_ORDERS_PORT:-8053}
       - AGENTS_ENABLED=${AGENTS_ENABLED:-false}
+      # Phase 1 parameterization variables
+      - HOST=${HOST:-localhost}
       - ARCHON_HOST=${HOST:-localhost}
+      - BIND_IP=${BIND_IP:-127.0.0.1}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3737}
+      - API_BASE_URL=${API_BASE_URL:-http://localhost:8181}
     networks:
       - app-network
     volumes:
@@ -157,10 +162,10 @@ services:
           "-c",
           'python -c "import urllib.request; urllib.request.urlopen(''http://localhost:${ARCHON_AGENTS_PORT:-8052}/health'')"',
         ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      interval: 15s
+      timeout: 15s
+      retries: 5
+      start_period: 120s
 
   # Agent Work Orders Service (Independent microservice for workflow execution)
   archon-agent-work-orders:
@@ -216,10 +221,12 @@ services:
 
   # Frontend
   archon-frontend:
-    build: ./archon-ui-main
+    build:
+      context: ./archon-ui-main
+      target: development
     container_name: archon-ui
     ports:
-      - "${ARCHON_UI_PORT:-3737}:3737"
+      - "${BIND_IP:-127.0.0.1}:${ARCHON_UI_PORT:-3737}:3737"
     environment:
       # Don't set VITE_API_URL so frontend uses relative URLs through proxy
       # - VITE_API_URL=http://${HOST:-localhost}:${ARCHON_SERVER_PORT:-8181}
@@ -228,15 +235,21 @@ services:
       - HOST=${HOST:-localhost}
       - PROD=${PROD:-false}
       - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-}
+      # MCP Configuration for local development
+      - VITE_MCP_HOST=${VITE_MCP_HOST:-localhost}
+      - VITE_MCP_PROTOCOL=${VITE_MCP_PROTOCOL:-http}
+      - VITE_MCP_USE_PROXY=${VITE_MCP_USE_PROXY:-false}
+      - VITE_MCP_PORT=${VITE_MCP_PORT:-8051}
       - VITE_SHOW_DEVTOOLS=${VITE_SHOW_DEVTOOLS:-false}
       - DOCKER_ENV=true
     networks:
       - app-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3737"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      interval: 15s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
     volumes:
       - ./archon-ui-main/src:/app/src
       - ./archon-ui-main/public:/app/public

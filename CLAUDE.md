@@ -104,19 +104,12 @@ uv run ruff check        # Run linter
 uv run ruff check --fix  # Auto-fix linting issues
 uv run mypy src/         # Type check
 
-# Agent Work Orders Service (independent microservice)
-make agent-work-orders  # Run agent work orders service locally on 8053
-# Or manually:
-uv run python -m uvicorn src.agent_work_orders.server:app --port 8053 --reload
-
 # Docker operations
 docker compose up --build -d       # Start all services
 docker compose --profile backend up -d  # Backend only (for hybrid dev)
-docker compose --profile work-orders up -d   # Include agent work orders service
-docker compose logs -f archon-server    # View server logs
-docker compose logs -f archon-mcp       # View MCP server logs
-docker compose logs -f archon-agent-work-orders  # View agent work orders service logs
-docker compose restart archon-server    # Restart after code changes
+docker compose logs -f archon-server   # View server logs
+docker compose logs -f archon-mcp      # View MCP server logs
+docker compose restart archon-server   # Restart after code changes
 docker compose down      # Stop all services
 docker compose down -v   # Stop and remove volumes
 ```
@@ -127,19 +120,8 @@ docker compose down -v   # Stop and remove volumes
 # Hybrid development (recommended) - backend in Docker, frontend local
 make dev                 # Or manually: docker compose --profile backend up -d && cd archon-ui-main && npm run dev
 
-# Hybrid with Agent Work Orders Service - backend in Docker, agent work orders local
-make dev-work-orders     # Starts backend in Docker, prompts to run agent service in separate terminal
-# Then in separate terminal:
-make agent-work-orders   # Start agent work orders service locally
-
 # Full Docker mode
 make dev-docker          # Or: docker compose up --build -d
-docker compose --profile work-orders up -d  # Include agent work orders service
-
-# All Local (3 terminals) - for agent work orders service development
-# Terminal 1: uv run python -m uvicorn src.server.main:app --port 8181 --reload
-# Terminal 2: make agent-work-orders
-# Terminal 3: cd archon-ui-main && npm run dev
 
 # Run linters before committing
 make lint                # Runs both frontend and backend linters
@@ -150,26 +132,6 @@ make lint-be             # Backend only (Ruff + MyPy)
 make test                # Run all tests
 make test-fe             # Frontend tests only
 make test-be             # Backend tests only
-
-# Prompt regression tests
-uv run python tests/prompts/test_code_summary_prompt.py  # Test code summary prompt
-uv run pytest tests/prompts/ -v                           # Run all prompt tests with pytest
-```
-
-### Prompt Regression Tests
-
-**Location**: `python/tests/prompts/`
-**Documentation**: `@PRPs/ai_docs/CODE_SUMMARY_PROMPT.md`
-
-Regression tests for AI prompts used in production. These ensure prompt changes don't break output structure or quality.
-
-**When to run**:
-- Before merging prompt changes
-- When updating LLM providers or models
-- As part of CI/CD pipeline
-- When debugging summary/output quality issues
-
-See `python/tests/prompts/README.md` for details on adding new prompt tests.
 ```
 
 ## Architecture Overview
@@ -197,6 +159,15 @@ See implementation examples:
 - Custom exceptions: `python/src/server/exceptions.py`
 - Exception handlers: `python/src/server/main.py` (search for @app.exception_handler)
 - Service error handling: `python/src/server/services/` (various services)
+
+### Important: Environment vs Database Settings
+
+**Critical**: The following settings MUST come from environment variables, NOT the database:
+- `HOST` - Server hostname/domain
+- `PORT` - Server port bindings
+- `BIND_IP` - Network binding interface
+
+These are deployment-specific and should never be loaded from the database settings table. The credential service has been updated to exclude these from database loading to prevent override issues in different deployment environments.
 
 ## ETag Implementation
 
@@ -236,16 +207,6 @@ SUPABASE_SERVICE_KEY=your-service-key-here      # Use legacy key format for clou
 Optional variables and full configuration:
 See `python/.env.example` for complete list
 
-### Repository Configuration
-
-Repository information (owner, name) is centralized in `python/src/server/config/version.py`:
-- `GITHUB_REPO_OWNER` - GitHub repository owner (default: "coleam00")
-- `GITHUB_REPO_NAME` - GitHub repository name (default: "Archon")
-
-This is the single source of truth for repository configuration. All services (version checking, bug reports, etc.) should import these constants rather than hardcoding repository URLs.
-
-Environment variable override: `GITHUB_REPO="owner/repo"` can be set to override defaults.
-
 ## Common Development Tasks
 
 ### Add a new API endpoint
@@ -257,15 +218,11 @@ Environment variable override: `GITHUB_REPO="owner/repo"` can be set to override
 
 ### Add a new UI component in features directory
 
-**IMPORTANT**: Review UI design standards in `@PRPs/ai_docs/UI_STANDARDS.md` before creating UI components.
-
 1. Use Radix UI primitives from `src/features/ui/primitives/`
 2. Create component in relevant feature folder under `src/features/[feature]/components/`
 3. Define types in `src/features/[feature]/types/`
 4. Use TanStack Query hook from `src/features/[feature]/hooks/`
 5. Apply Tron-inspired glassmorphism styling with Tailwind
-6. Follow responsive design patterns (mobile-first with breakpoints)
-7. Ensure no dynamic Tailwind class construction (see UI_STANDARDS.md Section 2)
 
 ### Add or modify MCP tools
 
@@ -320,8 +277,6 @@ When connected to Claude/Cursor/Windsurf, the following tools are available:
 - `archon:rag_search_knowledge_base` - Search knowledge base for relevant content
 - `archon:rag_search_code_examples` - Find code snippets in the knowledge base
 - `archon:rag_get_available_sources` - List available knowledge sources
-- `archon:rag_list_pages_for_source` - List all pages for a given source (browse documentation structure)
-- `archon:rag_read_full_page` - Retrieve full page content by page_id or URL
 
 ### Project Management
 
@@ -428,10 +383,6 @@ Based on user request, you **MUST** follow these sequences of tool calls
 
 [byterover-mcp]
 
-# important
-Always use byterover-retreive-knowledge tool to get related context before any task.
-Always use byterover-store-knowledge tool to store all the critical information after successful task.
-
 # Byterover MCP Server Tools Reference
 
 There are two main workflows with Byterover tools and recommended tool call strategies that you **MUST** follow precisely.
@@ -463,6 +414,10 @@ Based on user request, you **MUST** follow these sequences of tool calls
 6. You **MUST** use **byterover-update-module** **IMMEDIATELY** on changes to the module's purposes, technical details, or critical insights that essential for future implementations.
 
 [byterover-mcp]
+
+# important
+Always use byterover-retreive-knowledge tool to get related context before any task.
+Always use byterover-store-knowledge tool to store all the critical information after successful task.
 
 # Byterover MCP Server Tools Reference
 

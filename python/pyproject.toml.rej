@@ -1,8 +1,0 @@
-diff a/python/pyproject.toml b/python/pyproject.toml	(rejected hunks)
-@@ -176,4 +179,4 @@ check_untyped_defs = true
- 
- # Third-party libraries often don't have type stubs
- # We'll explicitly type our own code but not fail on external libs
--ignore_missing_imports = true
-\ No newline at end of file
-+ignore_missing_imports = true
