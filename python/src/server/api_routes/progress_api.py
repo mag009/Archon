@@ -13,7 +13,7 @@ from ..utils.progress import ProgressTracker
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/progress", tags=["progress"])
+router = APIRouter(prefix="/progress", tags=["progress"])
 
 # Terminal states that don't require further polling
 TERMINAL_STATES = {"completed", "failed", "error", "cancelled"}

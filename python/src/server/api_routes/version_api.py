@@ -47,7 +47,7 @@ class CurrentVersionResponse(BaseModel):
 
 
 # Create router
-router = APIRouter(prefix="/api/version", tags=["version"])
+router = APIRouter(prefix="/version", tags=["version"])
 
 
 @router.get("/check", response_model=VersionCheckResponse)

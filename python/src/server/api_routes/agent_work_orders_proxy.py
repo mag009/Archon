@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from ..config.service_discovery import get_agent_work_orders_url
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/agent-work-orders", tags=["agent-work-orders"])
+router = APIRouter(prefix="/agent-work-orders", tags=["agent-work-orders"])
 
 
 @router.api_route(

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 # Create router
-router = APIRouter(prefix="/api/agent-chat", tags=["agent-chat"])
+router = APIRouter(prefix="/agent-chat", tags=["agent-chat"])
 
 # Simple in-memory session storage
 sessions: dict[str, dict] = {}

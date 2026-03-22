@@ -19,7 +19,7 @@ from ..config.config import get_mcp_monitoring_config
 from ..config.logfire_config import api_logger, safe_set_attribute, safe_span
 from ..config.service_discovery import get_mcp_url
 
-router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 
 async def get_container_status_http() -> dict[str, Any]:

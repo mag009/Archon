@@ -22,7 +22,7 @@ from ..services.ollama.model_discovery_service import model_discovery_service
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/ollama", tags=["ollama"])
+router = APIRouter(prefix="/ollama", tags=["ollama"])
 
 
 # Pydantic models for API requests/responses

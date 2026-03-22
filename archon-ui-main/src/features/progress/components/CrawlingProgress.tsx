@@ -150,11 +150,15 @@ export const CrawlingProgress: React.FC<CrawlingProgressProps> = ({ onSwitchToBr
       <AnimatePresence mode="popLayout">
         {activeOperations.map((operation) => {
           const progress = getProgressPercentage(operation);
+          const isPaused = operation.status === "paused";
           const isActive = [
             "crawling",
             "processing",
             "in_progress",
             "starting",
+            "paused",
+            "stopping",
+            "cancelled",
             "initializing",
             "discovery",
             "analyzing",
@@ -163,6 +167,11 @@ export const CrawlingProgress: React.FC<CrawlingProgressProps> = ({ onSwitchToBr
             "document_storage",
             "code_extraction",
           ].includes(operation.status);
+
+          // Render if it's active OR paused OR failed (to allow retry/cancel)
+          if (!isActive && !isPaused && operation.status !== "failed") {
+            return null;
+          }
 
           return (
             <motion.div
@@ -177,7 +186,7 @@ export const CrawlingProgress: React.FC<CrawlingProgressProps> = ({ onSwitchToBr
                 className={cn(
                   "overflow-hidden transition-all duration-300 rounded-lg border",
                   "bg-black/40 backdrop-blur-sm border-white/10",
-                  isActive && "border-cyan-500/30 shadow-[0_0_20px_rgba(6,182,212,0.15)]",
+                  (isActive || isPaused) && "border-cyan-500/30 shadow-[0_0_20px_rgba(6,182,212,0.15)]",
                 )}
               >
                 <div className="p-4 border-b border-white/10">
@@ -287,7 +296,7 @@ export const CrawlingProgress: React.FC<CrawlingProgressProps> = ({ onSwitchToBr
 
                 <div className="p-4 space-y-3">
                   {/* Progress Bar */}
-                  {isActive && (
+                  {(isActive || isPaused) && (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-gray-400">Progress</span>

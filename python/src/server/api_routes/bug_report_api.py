@@ -16,7 +16,7 @@ from ..config.version import GITHUB_REPO_NAME, GITHUB_REPO_OWNER
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/bug-report", tags=["bug-report"])
+router = APIRouter(prefix="/bug-report", tags=["bug-report"])
 
 
 class BugContext(BaseModel):

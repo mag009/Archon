@@ -7,7 +7,7 @@ Handles recursive crawling of websites by following internal links.
 import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import urldefrag
+from urllib.parse import urldefrag, urlparse
 
 from crawl4ai import CacheMode, CrawlerRunConfig, MemoryAdaptiveDispatcher
 
@@ -319,6 +319,8 @@ class RecursiveCrawlStrategy:
                         })
                         depth_successful += 1
 
+                    # Extract links regardless of whether the page was stored (e.g., for directory pages)
+                    if result.success:
                         # Find internal links for next depth
                         links = getattr(result, "links", {}) or {}
                         for link in links.get("internal", []):
@@ -343,6 +345,17 @@ class RecursiveCrawlStrategy:
                                         f"Skipping URL (glob filter) from crawl queue: {next_url}"
                                     )
                                     continue
+                            
+                            # Extra check: If it's a GitHub link, only follow if it's a blob or a deeper tree
+                            if "github.com" in next_url:
+                                if "/blob/" not in next_url and "/tree/" not in next_url:
+                                    continue
+                                # For tree (directory) links, only follow if deeper to avoid cycles
+                                if "/tree/" in next_url:
+                                    current_path = urlparse(result.url).path.rstrip('/')
+                                    next_path = urlparse(next_url).path.rstrip('/')
+                                    if not next_path.startswith(current_path + '/'):
+                                        continue
 
                             # Add to next level queue
                             if next_url not in next_level_urls:

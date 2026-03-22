@@ -12,7 +12,7 @@ from ..services.credential_service import credential_service
 
 # Provider validation - simplified inline version
 
-router = APIRouter(prefix="/api/providers", tags=["providers"])
+router = APIRouter(prefix="/providers", tags=["providers"])
 
 
 async def test_openai_connection(api_key: str) -> bool:

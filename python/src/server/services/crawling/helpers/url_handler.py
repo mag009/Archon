@@ -39,19 +39,19 @@ class URLHandler:
     @staticmethod
     def is_markdown(url: str) -> bool:
         """
-        Check if a URL points to a markdown file (.md, .mdx, .markdown).
-        
+        Check if a URL points to a markdown or reStructuredText file.
+
         Args:
             url: URL to check
-            
+
         Returns:
-            True if URL is a markdown file, False otherwise
+            True if URL is a markdown or RST file, False otherwise
         """
         try:
             parsed = urlparse(url)
             # Normalize to lowercase and ignore query/fragment
             path = parsed.path.lower()
-            return path.endswith(('.md', '.mdx', '.markdown'))
+            return path.endswith(('.md', '.mdx', '.markdown', '.rst'))
         except Exception as e:
             logger.warning(f"Error checking if URL is markdown file: {e}", exc_info=True)
             return False
@@ -174,6 +174,33 @@ class URLHandler:
             logger.warning(f"Error checking if URL is binary file: {e}")
             # In case of error, don't skip the URL (safer to attempt crawl than miss content)
             return False
+
+    @staticmethod
+    def is_github_directory(url: str) -> bool:
+        """
+        Check if a URL is a GitHub directory (tree) URL.
+
+        Args:
+            url: URL to check
+
+        Returns:
+            True if URL is a GitHub directory, False otherwise
+        """
+        return bool(re.match(r"https://github\.com/[^/]+/[^/]+/tree/[^/]+/.+", url))
+
+    @staticmethod
+    def transform_url(url: str) -> str:
+        """
+        Generic URL transformation method.
+        Currently handles GitHub URL transformations.
+
+        Args:
+            url: URL to transform
+
+        Returns:
+            Transformed URL
+        """
+        return URLHandler.transform_github_url(url)
 
     @staticmethod
     def transform_github_url(url: str) -> str:

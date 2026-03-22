@@ -54,7 +54,7 @@ class MigrationHistoryResponse(BaseModel):
 
 
 # Create router
-router = APIRouter(prefix="/api/migrations", tags=["migrations"])
+router = APIRouter(prefix="/migrations", tags=["migrations"])
 
 
 @router.get("/status", response_model=MigrationStatusResponse)

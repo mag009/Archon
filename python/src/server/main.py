@@ -263,23 +263,23 @@ async def skip_health_check_logs(request, call_next):
 
 
 # Include API routers
-app.include_router(settings_router)
-app.include_router(mcp_router)
+app.include_router(settings_router, prefix="/api")
+app.include_router(mcp_router, prefix="/api")
 # app.include_router(mcp_client_router)  # Removed - not part of new architecture
-app.include_router(knowledge_router)
-app.include_router(pages_router)
-app.include_router(ollama_router)
-app.include_router(openrouter_router)
-app.include_router(projects_router)
-app.include_router(progress_router)
-app.include_router(agent_chat_router)
-app.include_router(agent_work_orders_router)  # Proxy to independent agent work orders service
-app.include_router(internal_router)
-app.include_router(bug_report_router)
-app.include_router(providers_router)
-app.include_router(version_router)
-app.include_router(migration_router)
-app.include_router(ingestion_router)
+app.include_router(knowledge_router, prefix="/api")
+app.include_router(pages_router, prefix="/api")
+app.include_router(ollama_router, prefix="/api")
+app.include_router(openrouter_router, prefix="/api")
+app.include_router(projects_router, prefix="/api")
+app.include_router(progress_router, prefix="/api")
+app.include_router(agent_chat_router, prefix="/api")
+app.include_router(agent_work_orders_router, prefix="/api")  # Proxy to independent agent work orders service
+app.include_router(internal_router, prefix="/api")
+app.include_router(bug_report_router, prefix="/api")
+app.include_router(providers_router, prefix="/api")
+app.include_router(version_router, prefix="/api")
+app.include_router(migration_router, prefix="/api")
+app.include_router(ingestion_router, prefix="/api")
 
 
 # Root endpoint

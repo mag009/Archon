@@ -5,7 +5,7 @@ Tracks operation progress in memory and persists to database for restart/resume 
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ...config.logfire_config import safe_logfire_error, safe_logfire_info
@@ -64,7 +64,7 @@ class ProgressTracker:
             self.state = {
                 "progress_id": progress_id,
                 "type": operation_type,  # Store operation type for progress model selection
-                "start_time": datetime.now().isoformat(),
+                "start_time": datetime.now(timezone.utc).isoformat(),
                 "status": "initializing",
                 "progress": 0,
                 "logs": [],
@@ -105,6 +105,7 @@ class ProgressTracker:
         # First, get in-memory states that are active (for tests and current session)
         for progress_id, state in cls._progress_states.items():
             status = state.get("status", "unknown")
+            # Include 'paused' in active operations
             if status not in ["completed", "failed", "error", "cancelled"]:
                 active[progress_id] = state
 
@@ -114,7 +115,7 @@ class ProgressTracker:
             result = (
                 supabase.table("archon_operation_progress")
                 .select("*")
-                .in_("status", ["starting", "in_progress", "paused"])
+                .not_("status", "in", "(completed,failed,error,cancelled)")
                 .execute()
             )
 
@@ -169,7 +170,7 @@ class ProgressTracker:
                     supabase.table("archon_operation_progress").update(
                         {
                             "status": "paused",
-                            "updated_at": datetime.now().isoformat(),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
                         }
                     ).eq("progress_id", progress_id).execute()
 
@@ -219,7 +220,7 @@ class ProgressTracker:
                     supabase.table("archon_operation_progress").update(
                         {
                             "status": "in_progress",
-                            "updated_at": datetime.now().isoformat(),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
                         }
                     ).eq("progress_id", progress_id).execute()
 
@@ -275,17 +276,25 @@ class ProgressTracker:
     async def pause_operation(cls, progress_id: str) -> bool:
         """Pause an operation."""
         try:
-            supabase = get_supabase_client()
-            supabase.table("archon_operation_progress").update(
-                {
-                    "status": "paused",
-                    "updated_at": datetime.now().isoformat(),
-                }
-            ).eq("progress_id", progress_id).execute()
-
-            # Also update in-memory
+            # Check memory first
             if progress_id in cls._progress_states:
-                cls._progress_states[progress_id]["status"] = "paused"
+                state = cls._progress_states[progress_id]
+                state["status"] = "paused"
+                state["updated_at"] = datetime.now(timezone.utc).isoformat()
+                
+                # Persist via instance method if possible
+                tracker = ProgressTracker(progress_id)
+                tracker.state = state
+                tracker._update_state()
+            else:
+                # Direct DB update if not in memory
+                supabase = get_supabase_client()
+                supabase.table("archon_operation_progress").update(
+                    {
+                        "status": "paused",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("progress_id", progress_id).execute()
 
             safe_logfire_info(f"Operation paused | progress_id={progress_id}")
             return True
@@ -298,17 +307,25 @@ class ProgressTracker:
     async def resume_operation(cls, progress_id: str) -> bool:
         """Resume a paused operation."""
         try:
-            supabase = get_supabase_client()
-            supabase.table("archon_operation_progress").update(
-                {
-                    "status": "in_progress",
-                    "updated_at": datetime.now().isoformat(),
-                }
-            ).eq("progress_id", progress_id).execute()
-
-            # Also update in-memory
+            # Check memory first
             if progress_id in cls._progress_states:
-                cls._progress_states[progress_id]["status"] = "in_progress"
+                state = cls._progress_states[progress_id]
+                state["status"] = "in_progress"
+                state["updated_at"] = datetime.now(timezone.utc).isoformat()
+                
+                # Persist via instance method if possible
+                tracker = ProgressTracker(progress_id)
+                tracker.state = state
+                tracker._update_state()
+            else:
+                # Direct DB update if not in memory
+                supabase = get_supabase_client()
+                supabase.table("archon_operation_progress").update(
+                    {
+                        "status": "in_progress",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("progress_id", progress_id).execute()
 
             safe_logfire_info(f"Operation resumed | progress_id={progress_id}")
             return True
@@ -342,7 +359,7 @@ class ProgressTracker:
             initial_data: Optional initial data to include
         """
         self.state["status"] = "starting"
-        self.state["start_time"] = datetime.now().isoformat()
+        self.state["start_time"] = datetime.now(timezone.utc).isoformat()
 
         if initial_data:
             self.state.update(initial_data)
@@ -388,7 +405,7 @@ class ProgressTracker:
                 "status": status,
                 "progress": actual_progress,
                 "log": log,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
 
@@ -404,7 +421,7 @@ class ProgressTracker:
             self.state["logs"] = []
         self.state["logs"].append(
             {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "message": log,
                 "status": status,
                 "progress": actual_progress,  # Use the actual progress after "never go backwards" check
@@ -435,14 +452,15 @@ class ProgressTracker:
         """
         self.state["status"] = "completed"
         self.state["progress"] = 100
-        self.state["end_time"] = datetime.now().isoformat()
+        self.state["end_time"] = datetime.now(timezone.utc).isoformat()
 
         if completion_data:
             self.state.update(completion_data)
 
         # Calculate duration
-        if "start_time" in self.state:
-            start = datetime.fromisoformat(self.state["start_time"])
+        start_time = self.state.get("start_time") or self.state.get("started_at")
+        if start_time:
+            start = datetime.fromisoformat(start_time)
             end = datetime.fromisoformat(self.state["end_time"])
             duration = (end - start).total_seconds()
             self.state["duration"] = str(duration)  # Convert to string for Pydantic model
@@ -468,7 +486,7 @@ class ProgressTracker:
             {
                 "status": "error",
                 "error": error_message,
-                "error_time": datetime.now().isoformat(),
+                "error_time": datetime.now(timezone.utc).isoformat(),
             }
         )
 
@@ -640,7 +658,7 @@ class ProgressTracker:
                 "code_blocks_found": self.state.get("code_blocks_found", 0),
                 "stats": stats,
                 "error_message": self.state.get("error"),
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
             # Upsert - atomic operation

@@ -12,7 +12,7 @@ from ..services.ingestion.health_check import get_ingestion_health_check
 from ..services.ingestion.summary_worker import get_summary_worker
 from ..utils import get_supabase_client
 
-router = APIRouter(prefix="/api/ingestion", tags=["ingestion"])
+router = APIRouter(prefix="/ingestion", tags=["ingestion"])
 
 
 @router.post("/process-embeddings")

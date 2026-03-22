@@ -446,6 +446,7 @@ async def get_llm_client(
             if not api_key:
                 raise ValueError("Google API key not found")
 
+            # Google's OpenAI-compatible endpoint is v1beta/openai
             client = openai.AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",

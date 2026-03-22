@@ -18,7 +18,7 @@ from ..config.logfire_config import logfire
 from ..services.credential_service import credential_service, initialize_credentials
 from ..utils import get_supabase_client
 
-router = APIRouter(prefix="/api", tags=["settings"])
+router = APIRouter(prefix="", tags=["settings"])
 
 
 class CredentialRequest(BaseModel):

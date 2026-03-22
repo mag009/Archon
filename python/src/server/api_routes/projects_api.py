@@ -37,7 +37,7 @@ from ..services.projects.versioning_service import VersioningService
 
 # Using HTTP polling for real-time updates
 
-router = APIRouter(prefix="/api", tags=["projects"])
+router = APIRouter(prefix="", tags=["projects"])
 
 
 class CreateProjectRequest(BaseModel):

@@ -8,7 +8,7 @@ from fastapi import APIRouter
 
 from ..services.openrouter_discovery_service import OpenRouterModelListResponse, openrouter_discovery_service
 
-router = APIRouter(prefix="/api/openrouter", tags=["openrouter"])
+router = APIRouter(prefix="/openrouter", tags=["openrouter"])
 
 
 @router.get("/models", response_model=OpenRouterModelListResponse)

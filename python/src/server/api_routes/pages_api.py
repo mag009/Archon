@@ -17,7 +17,7 @@ from ..utils import get_supabase_client
 logger = get_logger(__name__)
 
 # Create router
-router = APIRouter(prefix="/api", tags=["pages"])
+router = APIRouter(prefix="", tags=["pages"])
 
 # Maximum character count for returning full page content
 MAX_PAGE_CHARS = 20_000

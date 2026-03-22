@@ -37,7 +37,7 @@ from ..utils.url_validation import sanitize_glob_patterns, validate_url
 logger = get_logger(__name__)
 
 # Create router
-router = APIRouter(prefix="/api", tags=["knowledge"])
+router = APIRouter(prefix="", tags=["knowledge"])
 
 
 # Create a semaphore to limit concurrent crawl OPERATIONS (not pages within a crawl)
@@ -1453,9 +1453,9 @@ async def get_database_metrics():
 async def knowledge_health():
     """Knowledge API health check with migration detection."""
     # Check for database migration needs
-    from ..main import _check_database_schema
+    from ..main import _check_database_schema_cached
 
-    schema_status = await _check_database_schema()
+    schema_status = await _check_database_schema_cached()
     if not schema_status["valid"]:
         return {
             "status": "migration_required",
@@ -1555,7 +1555,15 @@ async def pause_crawl_task(progress_id: str):
         
         orchestration = await get_active_orchestration(progress_id)
         if orchestration:
+            # 1. Signal the orchestration instance to pause
             orchestration.pause()
+            
+            # 2. Cancel the asyncio task to force it into the CancelledError block immediately
+            if progress_id in active_crawl_tasks:
+                task = active_crawl_tasks[progress_id]
+                if not task.done():
+                    task.cancel()
+            
             return {
                 "success": True,
                 "message": "Crawl task paused successfully",
@@ -1575,18 +1583,72 @@ async def resume_crawl_task(progress_id: str):
     """Resume a paused crawl task."""
     try:
         from ..services.crawling import get_active_orchestration
-        safe_logfire_info(f"Resume crawl requested | progress_id={progress_id}")
+        from ..utils.progress.progress_tracker import ProgressTracker
         
+        safe_logfire_info(f"Resume crawl requested | progress_id={progress_id}")
+
+        # 1. Try to find in-memory orchestration first (standard pause/resume)
         orchestration = await get_active_orchestration(progress_id)
         if orchestration:
             orchestration.resume()
             return {
                 "success": True,
-                "message": "Crawl task resumed successfully",
+                "message": "In-memory crawl task resumed successfully",
                 "progressId": progress_id,
             }
-        else:
-            raise HTTPException(status_code=404, detail={"error": "No active task for given progress_id"})
+            
+        # 2. If not in memory, try to restore from database (resume after restart)
+        progress_data = ProgressTracker.get_progress(progress_id)
+        if not progress_data:
+            raise HTTPException(status_code=404, detail={"error": "No task state found for given progress_id"})
+            
+                # Extract necessary data for resuming
+        url = progress_data.get("url") or progress_data.get("current_url")
+        source_id = progress_data.get("source_id")
+        
+        if not url:
+            raise HTTPException(status_code=400, detail={"error": "Insufficient task state to resume crawl (missing URL)"})
+
+        # Trigger a new crawl
+        safe_logfire_info(f"Restoring crawl from database state | progress_id={progress_id} | url={url} | source_id={source_id}")
+
+        # Prepare the request for resumption
+        # We can resume if we have a source_id, otherwise we just start over with same progress_id
+        request_dict = {
+            "url": url,
+            "source_id": source_id,
+            "resume": True if source_id else False,
+            "knowledge_type": progress_data.get("knowledge_type", "technical"),
+            "extract_code": True
+        }
+        
+        # Get crawler and start background task
+        from ..services.crawler_manager import get_crawler
+        crawler = await get_crawler()
+        if not crawler:
+            raise Exception("Crawler initialization failed")
+            
+        # Import KnowledgeItemRequest for validation
+        from .knowledge_api import _perform_crawl_with_progress, KnowledgeItemRequest
+        
+        # Re-instantiate orchestration service
+        from ..services.crawling import CrawlingService
+        new_service = CrawlingService(crawler=crawler, progress_id=progress_id)
+        
+        # Use orchestrate_crawl to ensure the task is registered in active_crawl_tasks
+        # We pass request_dict directly
+        result = await new_service.orchestrate_crawl(request_dict)
+        
+        # Register the new task in the API-level registry so it can be stopped/paused again
+        if result.get("task"):
+            active_crawl_tasks[progress_id] = result.get("task")
+        
+        return {
+            "success": True,
+            "message": "Crawl task restored and resumed from database",
+            "progressId": progress_id,
+        }
+
     except HTTPException:
         raise
     except Exception as e:

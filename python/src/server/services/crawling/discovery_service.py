@@ -71,7 +71,7 @@ class DiscoveryService:
 
     # Known file extensions for path detection
     FILE_EXTENSIONS = {
-        '.html', '.htm', '.xml', '.json', '.txt', '.md', '.csv',
+        '.html', '.htm', '.xml', '.json', '.txt', '.md', '.rst', '.csv',
         '.rss', '.yaml', '.yml', '.pdf', '.zip'
     }
 
@@ -294,6 +294,7 @@ class DiscoveryService:
     EXPECTED_CONTENT_TYPES = {
         '.txt': ['text/plain', 'text/markdown', 'text/x-markdown'],
         '.md': ['text/plain', 'text/markdown', 'text/x-markdown'],
+        '.rst': ['text/plain', 'text/x-rst', 'text/restructuredtext'],
         '.xml': ['text/xml', 'application/xml', 'application/rss+xml', 'application/atom+xml'],
     }
 

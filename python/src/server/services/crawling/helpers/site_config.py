@@ -107,7 +107,7 @@ class SiteConfig:
             Configured markdown generator
         """
         prune_filter = PruningContentFilter(
-            threshold=0.2,
+            threshold=0.05,
             threshold_type="fixed"
         )
 
