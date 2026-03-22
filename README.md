@@ -80,7 +80,7 @@ This new vision for Archon replaces the old one (the agenteer). Archon used to b
 2. **Environment Configuration**:
 
    ```bash
-   cp .env.example .env
+   cp .env.unified.local .env
    # Edit .env and add your Supabase credentials:
    # SUPABASE_URL=https://your-project.supabase.co
    # SUPABASE_SERVICE_KEY=your-service-key-here
@@ -97,7 +97,7 @@ This new vision for Archon replaces the old one (the agenteer). Archon used to b
    **Full Docker Mode (Recommended for Normal Archon Usage)**
 
    ```bash
-   docker compose up --build -d
+   docker compose -f docker-compose.unified.yml up --build -d
    ```
 
    This starts all core microservices in Docker:
@@ -191,7 +191,7 @@ If you need to completely reset your database and start fresh:
 3. **Restart Services**:
 
    ```bash
-   docker compose --profile full up -d
+   docker compose -f docker-compose.unified.yml up -d
    ```
 
 4. **Reconfigure**:
@@ -503,6 +503,96 @@ docker system prune -f
 - **Frontend**: Ensure you're running in hybrid mode (`make dev`) for best HMR experience
 - **Backend**: Check that volumes are mounted correctly in `docker-compose.yml`
 - **File permissions**: On some systems, mounted volumes may have permission issues
+
+## 🌐 LAN/Production Deployment
+
+### Overview
+
+Deploy Archon on your local network for access from multiple devices or for production use with HTTPS support.
+
+### Prerequisites
+
+- Domain name (can be local like `archon.homelab.local`)
+- Reverse proxy (Traefik, Nginx, or Caddy) for HTTPS
+- Docker and Docker Compose
+
+### Configuration Files
+
+1. **`.env.unified.lan`** - LAN-specific environment variables:
+   ```bash
+   DEPLOYMENT_MODE=lan
+   BUILD_TARGET=production
+   HOST=archon.yourdomain.com  # Your domain
+   BIND_IP=0.0.0.0             # Allow external access
+   VITE_MCP_PROTOCOL=https
+   VITE_MCP_USE_PROXY=true
+   COMPOSE_PROFILES=prod
+   ```
+
+2. **`docker-compose.unified.yml`** - Unified deployment with profiles for dev/prod
+
+### Deployment Steps
+
+```bash
+# 1. Copy the LAN environment template
+cp .env.unified.lan .env
+
+# 2. Edit .env with your domain
+nano .env  # Update HOST to your domain
+
+# 3. Build and deploy all services
+docker-compose -f docker-compose.unified.yml --profile prod build --no-cache
+docker-compose -f docker-compose.unified.yml --profile prod up -d
+
+# 4. Check status
+docker-compose -f docker-compose.unified.yml ps
+```
+
+### Key Fixes Applied for LAN Deployment
+
+During development, we identified and fixed several critical issues for LAN deployment:
+
+1. **Service Discovery Fix** (`python/src/server/config/service_discovery.py`)
+   - Fixed hard-coded localhost in Docker Compose environment
+   - Added support for `VITE_MCP_USE_PROXY` to use external URLs
+   - Properly respects HOST environment variable
+
+2. **Credential Service Fix** (`python/src/server/services/credential_service.py`)
+   - Removed HOST and PORT from database-loaded credentials
+   - Prevents database settings from overriding environment variables
+   - Ensures deployment-specific config comes from environment only
+
+3. **MCP Configuration Fix** (`python/src/server/api_routes/mcp_api.py`)
+   - Updated `/api/mcp/config` endpoint to use service discovery
+   - Returns correct external URLs based on deployment mode
+
+4. **Frontend Multi-Stage Build** (`archon-ui-main/Dockerfile`)
+   - Added production stage for optimized builds
+   - Proper build args for Vite environment variables
+   - Static file serving for production
+
+5. **Docker Compose Updates** (`docker-compose.unified.yml`)
+   - Added `VITE_MCP_USE_PROXY` environment variable
+   - Proper profile configuration for dev/prod separation
+   - Docker socket access for container monitoring
+
+### Common LAN Deployment Issues
+
+#### MCP Dashboard Shows "localhost"
+- **Cause**: Database settings overriding environment variables
+- **Fix**: Applied in credential service - HOST/PORT no longer loaded from database
+
+#### Docker Status Shows "unavailable"
+- **Cause**: Docker socket not accessible in production
+- **Fix**: Set `DOCKER_SOCKET=/var/run/docker.sock` in `.env.unified.lan`
+
+#### Frontend Build Fails
+- **Cause**: Missing production stage in Dockerfile
+- **Fix**: Added multi-stage Dockerfile with development and production targets
+
+#### 406 Not Acceptable on MCP Endpoint
+- **Expected**: The `/mcp` endpoint requires SSE headers
+- **Note**: Frontend shouldn't call this directly - it's for MCP clients only
 
 ## 📈 Progress
 

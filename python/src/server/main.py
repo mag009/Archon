@@ -232,10 +232,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configure CORS
+# Configure CORS with environment variable support
+config = get_config()
+cors_origins = config.cors_origins.split(",") if config.cors_origins else ["http://localhost:3737"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

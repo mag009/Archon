@@ -16,7 +16,7 @@ services:
         ARCHON_SERVER_PORT: ${ARCHON_SERVER_PORT:-8181}
     container_name: archon-server
     ports:
-      - "${ARCHON_SERVER_PORT:-8181}:${ARCHON_SERVER_PORT:-8181}"
+      - "${BIND_IP:-127.0.0.1}:${ARCHON_SERVER_PORT:-8181}:${ARCHON_SERVER_PORT:-8181}"
     environment:
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
@@ -64,10 +64,10 @@ services:
           "-c",
           'python -c "import urllib.request; urllib.request.urlopen(''http://localhost:${ARCHON_SERVER_PORT:-8181}/health'')"',
         ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      interval: 15s
+      timeout: 15s
+      retries: 5
+      start_period: 240s
 
   # Lightweight MCP Server Service (HTTP-based)
   archon-mcp:
@@ -79,7 +79,7 @@ services:
         ARCHON_MCP_PORT: ${ARCHON_MCP_PORT:-8051}
     container_name: archon-mcp
     ports:
-      - "${ARCHON_MCP_PORT:-8051}:${ARCHON_MCP_PORT:-8051}"
+      - "${BIND_IP:-127.0.0.1}:${ARCHON_MCP_PORT:-8051}:${ARCHON_MCP_PORT:-8051}"
     environment:
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
@@ -94,6 +94,11 @@ services:
       - ARCHON_MCP_PORT=${ARCHON_MCP_PORT:-8051}
       - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
       - ARCHON_AGENTS_PORT=${ARCHON_AGENTS_PORT:-8052}
+      # Phase 1 parameterization variables
+      - HOST=${HOST:-localhost}
+      - BIND_IP=${BIND_IP:-127.0.0.1}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3737}
+      - API_BASE_URL=${API_BASE_URL:-http://localhost:8181}
     networks:
       - app-network
     depends_on:
@@ -110,10 +115,10 @@ services:
           "-c",
           'python -c "import socket; s=socket.socket(); s.connect((''localhost'', ${ARCHON_MCP_PORT:-8051})); s.close()"',
         ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s # Give dependencies time to start
+      interval: 15s
+      timeout: 15s
+      retries: 5
+      start_period: 300s # Give archon-server time to start (4 min + buffer)
 
   # AI Agents Service (ML/Reranking)
   archon-agents:
@@ -127,7 +132,7 @@ services:
         ARCHON_AGENTS_PORT: ${ARCHON_AGENTS_PORT:-8052}
     container_name: archon-agents
     ports:
-      - "${ARCHON_AGENTS_PORT:-8052}:${ARCHON_AGENTS_PORT:-8052}"
+      - "${BIND_IP:-127.0.0.1}:${ARCHON_AGENTS_PORT:-8052}:${ARCHON_AGENTS_PORT:-8052}"
     environment:
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
@@ -137,6 +142,11 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - ARCHON_AGENTS_PORT=${ARCHON_AGENTS_PORT:-8052}
       - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
+      # Phase 1 parameterization variables
+      - HOST=${HOST:-localhost}
+      - BIND_IP=${BIND_IP:-127.0.0.1}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3737}
+      - API_BASE_URL=${API_BASE_URL:-http://localhost:8181}
     networks:
       - app-network
     healthcheck:

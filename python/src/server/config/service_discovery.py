@@ -244,7 +244,8 @@ def get_api_url() -> str:
 
 def get_mcp_url() -> str:
     """Get the MCP service URL"""
-    return get_discovery().get_service_url("mcp")
+    protocol = os.getenv("VITE_MCP_PROTOCOL", "http")
+    return get_discovery().get_service_url("mcp", protocol)
 
 
 def get_agents_url() -> str:
