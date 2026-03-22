@@ -505,6 +505,42 @@ export function useStopCrawl() {
 }
 
 /**
+ * Pause an ongoing operation
+ */
+export function usePauseOperation() {
+  const { showToast } = useToast();
+
+  return useMutation({
+    mutationFn: (progressId: string) => knowledgeService.pauseOperation(progressId),
+    onSuccess: (_data, progressId) => {
+      showToast(`Operation paused (${progressId})`, "info");
+    },
+    onError: (error, progressId) => {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      showToast(`Failed to pause operation (${progressId}): ${errorMessage}`, "error");
+    },
+  });
+}
+
+/**
+ * Resume a paused operation
+ */
+export function useResumeOperation() {
+  const { showToast } = useToast();
+
+  return useMutation({
+    mutationFn: (progressId: string) => knowledgeService.resumeOperation(progressId),
+    onSuccess: (_data, progressId) => {
+      showToast(`Operation resumed (${progressId})`, "success");
+    },
+    onError: (error, progressId) => {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      showToast(`Failed to resume operation (${progressId}): ${errorMessage}`, "error");
+    },
+  });
+}
+
+/**
  * Delete knowledge item mutation
  */
 export function useDeleteKnowledgeItem() {
@@ -705,6 +741,56 @@ export function useRefreshKnowledgeItem() {
     },
     onError: (error) => {
       const errorMessage = error instanceof Error ? error.message : "Failed to refresh item";
+      showToast(errorMessage, "error");
+    },
+  });
+}
+
+/**
+ * Re-vectorize knowledge item mutation
+ */
+export function useRevectorizeKnowledgeItem() {
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+
+  return useMutation({
+    mutationFn: (sourceId: string) => knowledgeService.revectorizeKnowledgeItem(sourceId),
+    onSuccess: (data, sourceId) => {
+      showToast(`Re-vectorized ${data.documents_updated} documents`, "success");
+
+      // Invalidate the item detail and summaries
+      queryClient.removeQueries({ queryKey: knowledgeKeys.detail(sourceId) });
+      queryClient.invalidateQueries({ queryKey: knowledgeKeys.summariesPrefix() });
+
+      return data;
+    },
+    onError: (error) => {
+      const errorMessage = error instanceof Error ? error.message : "Failed to re-vectorize";
+      showToast(errorMessage, "error");
+    },
+  });
+}
+
+/**
+ * Re-summarize knowledge item mutation
+ */
+export function useResummarizeKnowledgeItem() {
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+
+  return useMutation({
+    mutationFn: (sourceId: string) => knowledgeService.resummarizeKnowledgeItem(sourceId),
+    onSuccess: (data, sourceId) => {
+      showToast(`Re-summarized ${data.examples_updated} code examples using ${data.model_used}`, "success");
+
+      // Invalidate the item detail and summaries
+      queryClient.removeQueries({ queryKey: knowledgeKeys.detail(sourceId) });
+      queryClient.invalidateQueries({ queryKey: knowledgeKeys.summariesPrefix() });
+
+      return data;
+    },
+    onError: (error) => {
+      const errorMessage = error instanceof Error ? error.message : "Failed to re-summarize";
       showToast(errorMessage, "error");
     },
   });

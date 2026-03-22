@@ -101,6 +101,44 @@ export const knowledgeService = {
   },
 
   /**
+   * Re-vectorize all documents in a knowledge item (without re-crawling)
+   */
+  async revectorizeKnowledgeItem(sourceId: string): Promise<{
+    success: boolean;
+    progressId: string;
+    message: string;
+  }> {
+    const response = await callAPIWithETag<{
+      success: boolean;
+      progressId: string;
+      message: string;
+    }>(`/api/knowledge-items/${sourceId}/revectorize`, {
+      method: "POST",
+    });
+
+    return response;
+  },
+
+  /**
+   * Re-summarize all code examples in a knowledge item (without re-crawling)
+   */
+  async resummarizeKnowledgeItem(sourceId: string): Promise<{
+    success: boolean;
+    progressId: string;
+    message: string;
+  }> {
+    const response = await callAPIWithETag<{
+      success: boolean;
+      progressId: string;
+      message: string;
+    }>(`/api/knowledge-items/${sourceId}/resummarize`, {
+      method: "POST",
+    });
+
+    return response;
+  },
+
+  /**
    * Upload a document
    */
   async uploadDocument(
@@ -147,6 +185,27 @@ export const knowledgeService = {
     return callAPIWithETag<{ success: boolean; message: string }>(`/api/knowledge-items/stop/${progressId}`, {
       method: "POST",
     });
+  },
+
+  /**
+   * Pause a running operation
+   */
+  async pauseOperation(progressId: string): Promise<{ success: boolean; message: string }> {
+    return callAPIWithETag<{ success: boolean; message: string }>(`/api/knowledge-items/pause/${progressId}`, {
+      method: "POST",
+    });
+  },
+
+  /**
+   * Resume a paused operation
+   */
+  async resumeOperation(progressId: string): Promise<{ success: boolean; message: string; sourceId?: string }> {
+    return callAPIWithETag<{ success: boolean; message: string; sourceId?: string }>(
+      `/api/knowledge-items/resume/${progressId}`,
+      {
+        method: "POST",
+      },
+    );
   },
 
   /**

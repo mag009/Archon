@@ -14,6 +14,7 @@ from ..source_management_service import extract_source_summary, update_source_in
 from ..storage.document_storage_service import add_documents_to_supabase
 from ..storage.storage_services import DocumentStorageService
 from .code_extraction_service import CodeExtractionService
+from .crawl_url_state_service import get_crawl_url_state_service
 
 logger = get_logger(__name__)
 
@@ -62,8 +63,32 @@ class DocumentStorageOperations:
         Returns:
             Dict containing storage statistics and document mappings
         """
+        # Check if new pipeline should be used
+        if request.get("use_new_pipeline", False):
+            return await self._process_with_new_pipeline(
+                crawl_results,
+                request,
+                crawl_type,
+                original_source_id,
+                progress_callback,
+                cancellation_check,
+                source_url,
+                source_display_name,
+            )
+
         # Reuse initialized storage service for chunking
         storage_service = self.doc_storage_service
+
+        # Initialize URL state tracking if enabled
+        url_state_service = get_crawl_url_state_service(self.supabase_client)
+        unique_doc_urls = [doc.get("url", "").strip() for doc in crawl_results if doc.get("url", "").strip()]
+        unique_doc_urls = list(set(unique_doc_urls))
+        if unique_doc_urls:
+            try:
+                url_state_service.initialize_urls(original_source_id, unique_doc_urls)
+                safe_logfire_info(f"Initialized URL state tracking for {len(unique_doc_urls)} URLs")
+            except Exception as e:
+                safe_logfire_error(f"Failed to initialize URL state: {e}")
 
         # Prepare data for chunked storage
         all_urls = []
@@ -85,12 +110,12 @@ class DocumentStorageOperations:
                         await progress_callback(
                             "cancelled",
                             99,
-                            f"Document processing cancelled at document {doc_index + 1}/{len(crawl_results)}"
+                            f"Document processing cancelled at document {doc_index + 1}/{len(crawl_results)}",
                         )
                     raise
 
-            doc_url = (doc.get('url') or '').strip()
-            markdown_content = (doc.get('markdown') or '').strip()
+            doc_url = (doc.get("url") or "").strip()
+            markdown_content = (doc.get("markdown") or "").strip()
 
             # Skip documents with empty or whitespace-only content or missing URLs
             if not markdown_content or not doc_url:
@@ -121,7 +146,7 @@ class DocumentStorageOperations:
                             await progress_callback(
                                 "cancelled",
                                 99,
-                                f"Chunk processing cancelled at chunk {i + 1}/{len(chunks)} of document {doc_index + 1}"
+                                f"Chunk processing cancelled at chunk {i + 1}/{len(chunks)} of document {doc_index + 1}",
                             )
                         raise
 
@@ -160,18 +185,17 @@ class DocumentStorageOperations:
         # Create/update source record FIRST (required for FK constraints on pages and chunks)
         if all_contents and all_metadatas:
             await self._create_source_records(
-                all_metadatas, all_contents, source_word_counts, request,
-                source_url, source_display_name
+                all_metadatas, all_contents, source_word_counts, request, source_url, source_display_name
             )
 
         # Store pages AFTER source is created but BEFORE chunks (FK constraint requirement)
         from .page_storage_operations import PageStorageOperations
+
         page_storage_ops = PageStorageOperations(self.supabase_client)
 
         # Check if this is an llms-full.txt file
         is_llms_full = crawl_type == "llms-txt" or (
-            len(url_to_full_document) == 1 and
-            next(iter(url_to_full_document.keys())).endswith("llms-full.txt")
+            len(url_to_full_document) == 1 and next(iter(url_to_full_document.keys())).endswith("llms-full.txt")
         )
 
         if is_llms_full and url_to_full_document:
@@ -190,6 +214,7 @@ class DocumentStorageOperations:
 
             # Parse sections and re-chunk each section
             from .helpers.llms_full_parser import parse_llms_full_sections
+
             sections = parse_llms_full_sections(content, base_url)
 
             # Clear existing chunks and re-create from sections
@@ -203,9 +228,7 @@ class DocumentStorageOperations:
             for section in sections:
                 # Update url_to_full_document with section content
                 url_to_full_document[section.url] = section.content
-                section_chunks = await storage_service.smart_chunk_text_async(
-                    section.content, chunk_size=5000
-                )
+                section_chunks = await storage_service.smart_chunk_text_async(section.content, chunk_size=5000)
 
                 for i, chunk in enumerate(section_chunks):
                     all_urls.append(section.url)
@@ -231,10 +254,12 @@ class DocumentStorageOperations:
             # Handle regular pages
             reconstructed_crawl_results = []
             for url, markdown in url_to_full_document.items():
-                reconstructed_crawl_results.append({
-                    "url": url,
-                    "markdown": markdown,
-                })
+                reconstructed_crawl_results.append(
+                    {
+                        "url": url,
+                        "markdown": markdown,
+                    }
+                )
 
             if reconstructed_crawl_results:
                 url_to_page_id = await page_storage_ops.store_pages(
@@ -276,16 +301,25 @@ class DocumentStorageOperations:
             url_to_page_id=url_to_page_id,  # Link chunks to pages
         )
 
+        # Mark URLs as embedded after successful storage
+        if unique_doc_urls:
+            try:
+                for doc_url in unique_doc_urls:
+                    url_state_service.mark_embedded(original_source_id, doc_url)
+                safe_logfire_info(f"Marked {len(unique_doc_urls)} URLs as embedded")
+            except Exception as e:
+                safe_logfire_error(f"Failed to mark URLs as embedded: {e}")
+
         # Calculate chunk counts
         chunk_count = len(all_contents)
         chunks_stored = storage_stats.get("chunks_stored", 0)
 
         return {
-            'chunk_count': chunk_count,
-            'chunks_stored': chunks_stored,
-            'total_word_count': sum(source_word_counts.values()),
-            'url_to_full_document': url_to_full_document,
-            'source_id': original_source_id
+            "chunk_count": chunk_count,
+            "chunks_stored": chunks_stored,
+            "total_word_count": sum(source_word_counts.values()),
+            "url_to_full_document": url_to_full_document,
+            "source_id": original_source_id,
         }
 
     async def _create_source_records(
@@ -323,11 +357,9 @@ class DocumentStorageOperations:
             # Track word counts per source_id
             if source_id not in source_id_word_counts:
                 source_id_word_counts[source_id] = 0
-            source_id_word_counts[source_id] += metadata.get('word_count', 0)
+            source_id_word_counts[source_id] += metadata.get("word_count", 0)
 
-        safe_logfire_info(
-            f"Found {len(unique_source_ids)} unique source_ids: {list(unique_source_ids)}"
-        )
+        safe_logfire_info(f"Found {len(unique_source_ids)} unique source_ids: {list(unique_source_ids)}")
 
         # Create source records for ALL unique source_ids
         for source_id in unique_source_ids:
@@ -346,9 +378,7 @@ class DocumentStorageOperations:
                 summary = await extract_source_summary(source_id, combined_content)
             except Exception as e:
                 logger.error(f"Failed to generate AI summary for '{source_id}'", exc_info=True)
-                safe_logfire_error(
-                    f"Failed to generate AI summary for '{source_id}': {str(e)}, using fallback"
-                )
+                safe_logfire_error(f"Failed to generate AI summary for '{source_id}': {str(e)}, using fallback")
                 # Fallback to simple summary
                 summary = f"Documentation from {source_id} - {len(source_contents)} pages crawled"
 
@@ -357,6 +387,29 @@ class DocumentStorageOperations:
                 f"About to create/update source record for '{source_id}' (word count: {source_id_word_counts[source_id]})"
             )
             try:
+                # Get current embedding configuration for provenance tracking
+                from ..credential_service import credential_service
+
+                embedding_config = await credential_service.get_credentials_by_category("embedding")
+                embedding_provider = embedding_config.get("EMBEDDING_PROVIDER", "openai")
+                embedding_model = embedding_config.get("EMBEDDING_MODEL", "text-embedding-3-small")
+                embedding_dimensions = int(embedding_config.get("EMBEDDING_DIMENSIONS", "1536"))
+
+                # Get vectorizer settings from credentials
+                use_contextual = await credential_service.get_credential("USE_CONTEXTUAL_EMBEDDINGS", False)
+                use_hybrid = await credential_service.get_credential("USE_HYBRID_SEARCH", False)
+                chunk_size = await credential_service.get_credential("CHUNK_SIZE", 5000)
+
+                vectorizer_settings = {
+                    "use_contextual": use_contextual,
+                    "use_hybrid": use_hybrid,
+                    "chunk_size": chunk_size,
+                }
+
+                # Get summarization model from RAG strategy
+                rag_settings = await credential_service.get_credentials_by_category("rag_strategy")
+                summarization_model = rag_settings.get("MODEL_CHOICE", "gpt-4o-mini")
+
                 # Call async update_source_info directly
                 await update_source_info(
                     client=self.supabase_client,
@@ -370,13 +423,16 @@ class DocumentStorageOperations:
                     original_url=request.get("url"),  # Store the original crawl URL
                     source_url=source_url,
                     source_display_name=source_display_name,
+                    embedding_model=embedding_model,
+                    embedding_dimensions=embedding_dimensions,
+                    embedding_provider=embedding_provider,
+                    vectorizer_settings=vectorizer_settings,
+                    summarization_model=summarization_model,
                 )
                 safe_logfire_info(f"Successfully created/updated source record for '{source_id}'")
             except Exception as e:
                 logger.error(f"Failed to create/update source record for '{source_id}'", exc_info=True)
-                safe_logfire_error(
-                    f"Failed to create/update source record for '{source_id}': {str(e)}"
-                )
+                safe_logfire_error(f"Failed to create/update source record for '{source_id}': {str(e)}")
                 # Try a simpler approach with minimal data
                 try:
                     safe_logfire_info(f"Attempting fallback source creation for '{source_id}'")
@@ -404,9 +460,7 @@ class DocumentStorageOperations:
                     safe_logfire_info(f"Fallback source creation succeeded for '{source_id}'")
                 except Exception as fallback_error:
                     logger.error(f"Both source creation attempts failed for '{source_id}'", exc_info=True)
-                    safe_logfire_error(
-                        f"Both source creation attempts failed for '{source_id}': {str(fallback_error)}"
-                    )
+                    safe_logfire_error(f"Both source creation attempts failed for '{source_id}': {str(fallback_error)}")
                     raise RuntimeError(
                         f"Unable to create source record for '{source_id}'. This will cause foreign key violations."
                     ) from fallback_error
@@ -471,3 +525,147 @@ class DocumentStorageOperations:
         )
 
         return result
+
+    async def _process_with_new_pipeline(
+        self,
+        crawl_results: list[dict],
+        request: dict[str, Any],
+        crawl_type: str,
+        original_source_id: str,
+        progress_callback: Callable | None = None,
+        cancellation_check: Callable | None = None,
+        source_url: str | None = None,
+        source_display_name: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Process documents using the new restartable pipeline.
+
+        This creates document blobs, chunks, and queues embedding/summary jobs.
+        Actual embedding and summarization happens later when workers are triggered.
+        """
+        from ..ingestion.pipeline_orchestrator import get_pipeline_orchestrator
+
+        safe_logfire_info(f"Using new restartable pipeline | source_id={original_source_id}")
+
+        # Transform crawl results into document format for pipeline
+        documents = []
+        for doc in crawl_results:
+            doc_url = (doc.get("url") or "").strip()
+            markdown_content = (doc.get("markdown") or "").strip()
+
+            if not markdown_content or not doc_url:
+                continue
+
+            documents.append(
+                {
+                    "url": doc_url,
+                    "content": markdown_content,
+                    "title": doc.get("title", ""),
+                }
+            )
+
+        if not documents:
+            safe_logfire_error(f"No valid documents to process | source_id={original_source_id}")
+            return {
+                "source_id": original_source_id,
+                "chunk_count": 0,
+                "chunks_stored": 0,
+                "urls_stored": set(),
+                "url_to_page_id": {},
+            }
+
+        # Create source record first
+        await self._create_source_record_for_new_pipeline(
+            original_source_id,
+            source_url or documents[0]["url"],
+            source_display_name,
+            request,
+        )
+
+        # Run pipeline orchestrator
+        orchestrator = get_pipeline_orchestrator(self.supabase_client)
+
+        # Create progress wrapper for pipeline
+        async def pipeline_progress_callback(stage: str, progress: int, message: str):
+            if progress_callback:
+                await progress_callback(stage, progress, message)
+
+        result = await orchestrator.run_pipeline(
+            source_id=original_source_id,
+            documents=documents,
+            chunk_size=request.get("chunk_size", 5000),
+            embedder_id=request.get("embedder_id", "default"),
+            summarizer_model_id=request.get("summarizer_model_id"),
+            summary_style=request.get("summary_style", "OVERVIEW"),
+            progress_callback=pipeline_progress_callback,
+        )
+
+        safe_logfire_info(
+            f"New pipeline completed | source_id={original_source_id} | "
+            f"blobs={result.get('blobs_created', 0)} | "
+            f"chunks={result.get('chunks_created', 0)} | "
+            f"embedding_set_id={result.get('embedding_set_id')} | "
+            f"summary_id={result.get('summary_id')}"
+        )
+
+        # Create url_to_full_document mapping for compatibility
+        url_to_full_document = {doc["url"]: doc["content"] for doc in documents}
+
+        # Return compatible response format
+        return {
+            "source_id": original_source_id,
+            "chunk_count": result.get("chunks_created", 0),
+            "chunks_stored": result.get("chunks_created", 0),
+            "urls_stored": {doc["url"] for doc in documents},
+            "url_to_page_id": {},
+            "url_to_full_document": url_to_full_document,
+            "embedding_set_id": result.get("embedding_set_id"),
+            "summary_id": result.get("summary_id"),
+            "new_pipeline_used": True,
+        }
+
+    async def _create_source_record_for_new_pipeline(
+        self,
+        source_id: str,
+        source_url: str,
+        source_display_name: str | None,
+        request: dict[str, Any],
+    ):
+        """
+        Create archon_sources record for new pipeline.
+
+        The new pipeline uses archon_document_blobs and archon_chunks tables,
+        but we still need an archon_sources record for compatibility.
+        """
+        try:
+            response = (
+                self.supabase_client.table("archon_sources").select("source_id").eq("source_id", source_id).execute()
+            )
+
+            if not response.data:
+                # Create new source record
+                source_record = {
+                    "source_id": source_id,
+                    "source_url": source_url,
+                    "source_url_display_name": source_display_name or source_url,
+                    "source_type": "url",
+                    "knowledge_type": request.get("knowledge_type", "documentation"),
+                    "tags": request.get("tags", []),
+                    "pipeline_status": "chunking",
+                    "pipeline_stage_status": {},
+                }
+                self.supabase_client.table("archon_sources").insert(source_record).execute()
+                safe_logfire_info(f"Created archon_sources record | source_id={source_id}")
+            else:
+                # Update existing source
+                self.supabase_client.table("archon_sources").update(
+                    {
+                        "pipeline_status": "chunking",
+                        "updated_at": "now()",
+                    }
+                ).eq("source_id", source_id).execute()
+                safe_logfire_info(f"Updated archon_sources record | source_id={source_id}")
+
+        except Exception as e:
+            safe_logfire_error(f"Failed to create/update archon_sources record | error={str(e)}")
+            raise

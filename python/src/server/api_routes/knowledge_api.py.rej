@@ -1,0 +1,23 @@
+diff a/python/src/server/api_routes/knowledge_api.py b/python/src/server/api_routes/knowledge_api.py	(rejected hunks)
+@@ -1035,7 +1035,10 @@ def check_upload_cancellation():
+ 
+         # Create progress callback for tracking document processing
+         async def document_progress_callback(
+-            message: str, percentage: int, batch_info: dict = None
++            message: str,
++            percentage: int,
++            batch_info: dict | None = None,
++            **extra_fields,
+         ):
+             """Progress callback for tracking document processing"""
+             # Map the document storage progress to overall progress range
+@@ -1047,7 +1050,8 @@ async def document_progress_callback(
+                 progress=mapped_percentage,
+                 log=message,
+                 currentUrl=f"file://{filename}",
+-                **(batch_info or {})
++                **(batch_info or {}),
++                **extra_fields,
+             )
+ 
+ 
